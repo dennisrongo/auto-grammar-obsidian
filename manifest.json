@@ -1,0 +1,11 @@
+{
+	"id": "ai-grammar-assistant",
+	"name": "AI Grammar Assistant",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "AI-powered grammar correction and writing assistance for Obsidian notes",
+	"author": "Dennis",
+	"authorUrl": "",
+	"fundingUrl": "",
+	"isDesktopOnly": false
+}
