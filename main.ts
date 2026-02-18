@@ -1154,7 +1154,7 @@ class AISettingTab extends PluginSettingTab {
 		containerEl.createEl('p', {text: 'Ghost text will appear in gray at your cursor position'});
 
 		containerEl.createEl('h3', {text: 'How to get started:'});
-		containerEl.createEl('p', {text: '1. Get an API key from Zhipu AI (https://open.bigmodel.cn/)'});
+		containerEl.createEl('p', {text: '1. Get an API key from Zhipu AI (https://z.ai/manage-apikey/apikey-list)'});
 		containerEl.createEl('p', {text: '2. Enter your API key above'});
 		containerEl.createEl('p', {text: '3. Right-click on any note or selected text to use the AI assistant'});
 	}

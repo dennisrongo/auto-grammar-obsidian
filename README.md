@@ -8,7 +8,9 @@ An Obsidian plugin that provides AI-powered grammar correction and writing assis
 - **Selected text correction** - Fix grammar and spelling in highlighted portions
 - **Entire document correction** - Process complete notes at once
 - **Writing improvement** - Enhance clarity, style, and flow
-- **Configurable AI provider** - Start with GLM 4.5 Flash, supports other providers
+- **Configurable AI provider** - Start with GLM-4-32B, supports other providers
+- **Real-time grammar checking** - Visual indicators as you type
+- **AI autocomplete/IntelliSense** - Predictive text suggestions
 - **Command palette integration** - Quick access via hotkeys
 
 ## Installation
@@ -20,10 +22,10 @@ An Obsidian plugin that provides AI-powered grammar correction and writing assis
 
 ## Setup
 
-1. Get an API key from [Zhipu AI](https://open.bigmodel.cn/)
+1. Get an API key from [Zhipu AI](https://z.ai/manage-apikey/apikey-list)
 2. Open plugin settings in Obsidian
 3. Enter your API key
-4. Configure model and base URL if needed (defaults are set for GLM 4.5 Flash)
+4. Configure model and base URL if needed (defaults are set for GLM-4-32B)
 
 ## Usage
 
@@ -44,8 +46,11 @@ An Obsidian plugin that provides AI-powered grammar correction and writing assis
 The plugin supports the following settings:
 
 - **API Key**: Your AI service authentication key
-- **Model**: AI model to use (default: glm-4.5-flash)
-- **Base URL**: API endpoint URL (default configured for GLM 4.5 Flash)
+- **Model**: AI model to use (default: GLM-4-32B-0414-128K)
+- **Base URL**: API endpoint URL (default: https://api.z.ai/api/paas/v4/chat/completions)
+- **Temperature**: Controls randomness (0.0 = deterministic, 1.0 = creative)
+- **Real-time Grammar Checking**: Enable/disable automatic checking
+- **Autocomplete**: Enable/disable AI-powered text predictions
 
 ## Development
 
