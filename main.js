@@ -21,15 +21,15 @@ var __copyProps = (to, from, except, desc) => {
 };
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// main.ts
-var main_exports = {};
-__export(main_exports, {
+// src/index.ts
+var src_exports = {};
+__export(src_exports, {
   default: () => AIGrammarAssistant
 });
-module.exports = __toCommonJS(main_exports);
-var import_obsidian = require("obsidian");
+module.exports = __toCommonJS(src_exports);
+var import_obsidian6 = require("obsidian");
 
-// providers.ts
+// src/utils/textUtils.ts
 function removeDuplicatePrefix(context, suggestion) {
   const contextWords = context.trim().toLowerCase().split(/\s+/);
   const suggestionWords = suggestion.trim().split(/\s+/);
@@ -52,10 +52,69 @@ function removeDuplicatePrefix(context, suggestion) {
   }
   return suggestion;
 }
-var ZAIProvider = class {
+function cleanAIResponse(response) {
+  let cleaned = response.trim();
+  cleaned = cleaned.replace(/^```(?:\w*)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+  cleaned = cleaned.replace(/^(Here'?s? (is )?(the )?correct(ed)? (text|version|grammar)[:.]?\s*)/i, "");
+  cleaned = cleaned.replace(/^(Corrected (text|version|grammar)[:.]?\s*)/i, "");
+  cleaned = cleaned.replace(/^(Here'?s? (is )?(the )?improved (text|version|writing)[:.]?\s*)/i, "");
+  cleaned = cleaned.replace(/^(Improved (text|version|writing)[:.]?\s*)/i, "");
+  return cleaned.trim();
+}
+function parseJsonArray(content) {
+  let parsed = content.trim();
+  parsed = parsed.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+  parsed = parsed.trim();
+  if (!parsed.startsWith("[") && !parsed.startsWith("{")) {
+    const jsonMatch = parsed.match(/\[[\s\S]*\]/);
+    if (jsonMatch) {
+      parsed = jsonMatch[0];
+    }
+  }
+  try {
+    const result = JSON.parse(parsed);
+    return Array.isArray(result) ? result : [];
+  } catch (e) {
+    return [];
+  }
+}
+function isAtStartOfSentence(textBefore) {
+  const isStartOfLine = textBefore.length === 0;
+  const isAfterSentenceEnd = /[.!?]\s*$/.test(textBefore);
+  const isAfterNewline = /\n\s*$/.test(textBefore);
+  return isStartOfLine || isAfterSentenceEnd || isAfterNewline;
+}
+function shouldTriggerAutocomplete(contextBefore, minLength = 10) {
+  const lastChar = contextBefore.slice(-1);
+  const validTrigger = !lastChar || /[\s\n.,!?;:]/.test(lastChar);
+  const enoughContext = contextBefore.trim().length >= minLength;
+  return validTrigger && enoughContext;
+}
+function preserveCapitalization(originalText, correctedText, isStartOfSentence) {
+  if (correctedText.length === 0)
+    return correctedText;
+  const startsWithLowercase = /^[a-z]/.test(originalText.trim());
+  if (!isStartOfSentence && startsWithLowercase) {
+    return correctedText.charAt(0).toLowerCase() + correctedText.slice(1);
+  }
+  return correctedText;
+}
+function extractWhitespace(text) {
+  var _a, _b;
+  const leading = ((_a = text.match(/^(\s*)/)) == null ? void 0 : _a[1]) || "";
+  const trailing = ((_b = text.match(/(\s*)$/)) == null ? void 0 : _b[1]) || "";
+  const content = text.trim();
+  return { leading, trailing, content };
+}
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+// src/providers/BaseProvider.ts
+var BaseProvider = class {
   constructor() {
-    this.name = "zai";
-    this.displayName = "Z.ai";
     this.apiKey = "";
     this.model = "";
     this.baseUrl = "";
@@ -64,6 +123,119 @@ var ZAIProvider = class {
     this.apiKey = apiKey;
     this.model = model;
     this.baseUrl = baseUrl;
+  }
+  getApiKey() {
+    return this.apiKey;
+  }
+  getModel() {
+    return this.model || this.getDefaultModel();
+  }
+  getBaseUrl() {
+    return this.baseUrl || this.getDefaultBaseUrl();
+  }
+  async makeChatRequest(systemPrompt, userMessage, temperature, maxTokens) {
+    var _a, _b, _c;
+    const response = await fetch(this.getBaseUrl(), {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${this.getApiKey()}`
+      },
+      body: JSON.stringify({
+        model: this.getModel(),
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage }
+        ],
+        temperature,
+        max_tokens: maxTokens
+      })
+    });
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}, message: ${await response.text()}`);
+    }
+    const data = await response.json();
+    let result = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "";
+    if (typeof result === "string") {
+      result = result.trim();
+    }
+    return result;
+  }
+  extractChoicesFromResponse(data) {
+    var _a, _b, _c;
+    return ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "";
+  }
+  async callAPI(text, instruction, temperature, maxTokens = 2e3) {
+    return this.makeChatRequest(instruction, text, temperature, maxTokens);
+  }
+  async getGrammarSuggestions(text, temperature) {
+    const systemPrompt = 'You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use ```json or ```. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]';
+    const content = await this.makeChatRequest(
+      systemPrompt,
+      `Please analyze this text for grammar and spelling issues: "${text}"`,
+      temperature,
+      1500
+    );
+    return parseJsonArray(content);
+  }
+  async getAutocompleteSuggestion(contextBefore, temperature, maxTokens) {
+    const systemPrompt = "You are a professional writing assistant. Continue the text in a formal, professional tone. Use clear and concise language. Avoid casual phrases, slang, or overly conversational style. Write as if for a business document or professional publication. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum).";
+    let suggestion = await this.makeChatRequest(
+      systemPrompt,
+      `Continue this text professionally: "${contextBefore}"`,
+      temperature,
+      maxTokens
+    );
+    suggestion = suggestion.trim();
+    if (contextBefore.endsWith(" ") || contextBefore.endsWith("\n")) {
+      suggestion = suggestion.trimStart();
+    }
+    return removeDuplicatePrefix(contextBefore, suggestion);
+  }
+  async testConnection(apiKey, model) {
+    try {
+      const savedApiKey = this.apiKey;
+      const savedModel = this.model;
+      this.apiKey = apiKey;
+      this.model = model || this.getDefaultModel();
+      const response = await fetch(this.getBaseUrl(), {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${this.getApiKey()}`
+        },
+        body: JSON.stringify({
+          model: this.getModel(),
+          messages: [
+            { role: "system", content: "You are a helpful AI assistant." },
+            { role: "user", content: 'Hello, please respond with "OK" to confirm you are working.' }
+          ],
+          temperature: this.getDefaultTemperature(),
+          max_tokens: 50
+        })
+      });
+      this.apiKey = savedApiKey;
+      this.model = savedModel;
+      if (!response.ok) {
+        return false;
+      }
+      const data = await response.json();
+      return data.choices && data.choices.length > 0;
+    } catch (e) {
+      return false;
+    }
+  }
+  async getAvailableModels(_apiKey) {
+    return [];
+  }
+};
+
+// src/providers/ZAIProvider.ts
+var ZAIProvider = class extends BaseProvider {
+  constructor() {
+    super(...arguments);
+    this.name = "zai";
+    this.displayName = "Z.ai";
   }
   getDefaultBaseUrl() {
     return "https://api.z.ai/api/paas/v4/chat/completions";
@@ -77,237 +249,14 @@ var ZAIProvider = class {
   getMaxTokens() {
     return { default: 1500, max: 4e3 };
   }
-  async callAPI(text, instruction, temperature, maxTokens = 2e3) {
-    var _a, _b, _c;
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        model: this.getModel(),
-        messages: [
-          {
-            role: "system",
-            content: instruction
-          },
-          {
-            role: "user",
-            content: text
-          }
-        ],
-        temperature,
-        max_tokens: maxTokens
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}, message: ${await response.text()}`);
-    }
-    const data = await response.json();
-    let result = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || text;
-    if (typeof result === "string") {
-      result = result.trim();
-    }
-    return result;
-  }
-  async getGrammarSuggestions(text, temperature) {
-    var _a, _b, _c;
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        model: this.getModel(),
-        messages: [
-          {
-            role: "system",
-            content: 'You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return only the JSON array without explanations. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]'
-          },
-          {
-            role: "user",
-            content: `Please analyze this text for grammar and spelling issues: "${text}"`
-          }
-        ],
-        temperature,
-        max_tokens: 1500
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}, ${await response.text()}`);
-    }
-    const data = await response.json();
-    let content = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "[]";
-    if (typeof content === "string") {
-      content = content.trim();
-      content = content.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-      content = content.trim();
-      if (!content.startsWith("[") && !content.startsWith("{")) {
-        const jsonMatch = content.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          content = jsonMatch[0];
-        }
-      }
-    }
-    try {
-      const suggestions = JSON.parse(content);
-      return Array.isArray(suggestions) ? suggestions : [];
-    } catch (error) {
-      console.error("Failed to parse suggestions JSON:", error, "Content was:", content);
-      return [];
-    }
-  }
-  async getAutocompleteSuggestion(contextBefore, temperature, maxTokens) {
-    var _a, _b, _c;
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        model: this.getModel(),
-        messages: [
-          {
-            role: "system",
-            content: "You are a professional writing assistant. Continue the text in a formal, professional tone. Use clear and concise language. Avoid casual phrases, slang, or overly conversational style. Write as if for a business document or professional publication. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum)."
-          },
-          {
-            role: "user",
-            content: `Continue this text professionally: "${contextBefore}"`
-          }
-        ],
-        temperature,
-        max_tokens: maxTokens,
-        stop: ["\n\n", "---"]
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-    const data = await response.json();
-    let suggestion = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "";
-    suggestion = suggestion.trim();
-    if (contextBefore.endsWith(" ") || contextBefore.endsWith("\n")) {
-      suggestion = suggestion.trimStart();
-    }
-    suggestion = removeDuplicatePrefix(contextBefore, suggestion);
-    return suggestion;
-  }
-  async testConnection(apiKey, model) {
-    try {
-      const response = await fetch(this.getBaseUrl(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: model || this.getDefaultModel(),
-          messages: [
-            {
-              role: "system",
-              content: "You are a helpful AI assistant."
-            },
-            {
-              role: "user",
-              content: 'Hello, please respond with "OK" to confirm you are working.'
-            }
-          ],
-          temperature: this.getDefaultTemperature(),
-          max_tokens: 50
-        })
-      });
-      if (!response.ok) {
-        return false;
-      }
-      const data = await response.json();
-      return data.choices && data.choices.length > 0;
-    } catch (error) {
-      return false;
-    }
-  }
-  getApiKey() {
-    return this.apiKey;
-  }
-  getModel() {
-    return this.model || this.getDefaultModel();
-  }
-  getBaseUrl() {
-    return this.baseUrl || this.getDefaultBaseUrl();
-  }
 };
-var OpenAIProvider = class {
+
+// src/providers/OpenAIProvider.ts
+var _OpenAIProvider = class extends BaseProvider {
   constructor() {
+    super(...arguments);
     this.name = "openai";
     this.displayName = "OpenAI";
-    this.apiKey = "";
-    this.model = "";
-    this.baseUrl = "";
-  }
-  setConfiguration(apiKey, model, baseUrl) {
-    this.apiKey = apiKey;
-    this.model = model;
-    this.baseUrl = baseUrl;
-  }
-  async getAvailableModels(apiKey) {
-    try {
-      const response = await fetch("https://api.openai.com/v1/models", {
-        method: "GET",
-        headers: {
-          "Authorization": `Bearer ${apiKey}`
-        }
-      });
-      if (!response.ok) {
-        console.error("Failed to fetch OpenAI models:", response.status);
-        return [
-          { id: "gpt-4o", name: "GPT-4o" },
-          { id: "gpt-4o-mini", name: "GPT-4o Mini" },
-          { id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-          { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" }
-        ];
-      }
-      const data = await response.json();
-      const models = data.data || [];
-      const filteredModels = models.filter((model) => {
-        return model.id.includes("gpt") && !model.id.includes("fine-tune") && !model.id.includes(":");
-      }).map((model) => {
-        let name = model.id.replace("gpt-", "GPT-").replace(/-/g, " ");
-        if (model.id.includes("4o")) {
-          name = name + " (Omni)";
-        }
-        if (model.id.includes("turbo")) {
-          name = name + " (Turbo)";
-        }
-        return {
-          id: model.id,
-          name
-        };
-      }).sort((a, b) => {
-        const order = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"];
-        const aIndex = order.findIndex((id) => a.id.includes(id));
-        const bIndex = order.findIndex((id) => b.id.includes(id));
-        if (aIndex !== -1 && bIndex !== -1) {
-          return aIndex - bIndex;
-        } else if (aIndex !== -1) {
-          return -1;
-        } else if (bIndex !== -1) {
-          return 1;
-        }
-        return a.id.localeCompare(b.id);
-      });
-      return filteredModels;
-    } catch (error) {
-      console.error("Failed to fetch OpenAI models:", error);
-      return [
-        { id: "gpt-4o", name: "GPT-4o" },
-        { id: "gpt-4o-mini", name: "GPT-4o Mini" },
-        { id: "gpt-4-turbo", name: "GPT-4 Turbo" },
-        { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" }
-      ];
-    }
   }
   getDefaultBaseUrl() {
     return "https://api.openai.com/v1/chat/completions";
@@ -321,219 +270,61 @@ var OpenAIProvider = class {
   getMaxTokens() {
     return { default: 1500, max: 4e3 };
   }
-  async callAPI(text, instruction, temperature, maxTokens = 2e3) {
-    var _a, _b, _c;
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        model: this.getModel(),
-        messages: [
-          {
-            role: "system",
-            content: instruction
-          },
-          {
-            role: "user",
-            content: text
-          }
-        ],
-        temperature,
-        max_tokens: maxTokens
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}, message: ${await response.text()}`);
-    }
-    const data = await response.json();
-    let result = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || text;
-    if (typeof result === "string") {
-      result = result.trim();
-    }
-    return result;
-  }
-  async getGrammarSuggestions(text, temperature) {
-    var _a, _b, _c;
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        model: this.getModel(),
-        messages: [
-          {
-            role: "system",
-            content: 'You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use ```json or ```. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]'
-          },
-          {
-            role: "user",
-            content: `Please analyze this text for grammar and spelling issues: "${text}"`
-          }
-        ],
-        temperature,
-        max_tokens: 1500
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}, ${await response.text()}`);
-    }
-    const data = await response.json();
-    let content = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "[]";
-    if (typeof content === "string") {
-      content = content.trim();
-      content = content.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-      content = content.trim();
-      if (!content.startsWith("[") && !content.startsWith("{")) {
-        const jsonMatch = content.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          content = jsonMatch[0];
-        }
-      }
-    }
-    try {
-      const suggestions = JSON.parse(content);
-      return Array.isArray(suggestions) ? suggestions : [];
-    } catch (error) {
-      console.error("Failed to parse suggestions JSON:", error, "Content was:", content);
-      return [];
-    }
-  }
-  async getAutocompleteSuggestion(contextBefore, temperature, maxTokens) {
-    var _a, _b, _c;
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        model: this.getModel(),
-        messages: [
-          {
-            role: "system",
-            content: "You are a professional writing assistant. Continue the text in a formal, professional tone. Use clear and concise language. Avoid casual phrases, slang, or overly conversational style. Write as if for a business document or professional publication. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum)."
-          },
-          {
-            role: "user",
-            content: `Continue this text professionally: "${contextBefore}"`
-          }
-        ],
-        temperature,
-        max_tokens: maxTokens,
-        stop: ["\n\n", "---"]
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-    const data = await response.json();
-    let suggestion = ((_c = (_b = (_a = data.choices) == null ? void 0 : _a[0]) == null ? void 0 : _b.message) == null ? void 0 : _c.content) || "";
-    suggestion = suggestion.trim();
-    if (contextBefore.endsWith(" ") || contextBefore.endsWith("\n")) {
-      suggestion = suggestion.trimStart();
-    }
-    suggestion = removeDuplicatePrefix(contextBefore, suggestion);
-    return suggestion;
-  }
-  async testConnection(apiKey, model) {
-    try {
-      const response = await fetch(this.getBaseUrl(), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: model || this.getDefaultModel(),
-          messages: [
-            {
-              role: "system",
-              content: "You are a helpful AI assistant."
-            },
-            {
-              role: "user",
-              content: 'Hello, please respond with "OK" to confirm you are working.'
-            }
-          ],
-          temperature: this.getDefaultTemperature(),
-          max_tokens: 50
-        })
-      });
-      if (!response.ok) {
-        return false;
-      }
-      const data = await response.json();
-      return data.choices && data.choices.length > 0;
-    } catch (error) {
-      return false;
-    }
-  }
-  getApiKey() {
-    return this.apiKey;
-  }
-  getModel() {
-    return this.model || this.getDefaultModel();
-  }
-  getBaseUrl() {
-    return this.baseUrl || this.getDefaultBaseUrl();
-  }
-};
-var StraicoProvider = class {
-  constructor() {
-    this.name = "straico";
-    this.displayName = "Straico";
-    this.apiKey = "";
-    this.model = "";
-    this.baseUrl = "";
-  }
-  setConfiguration(apiKey, model, baseUrl) {
-    this.apiKey = apiKey;
-    this.model = model;
-    this.baseUrl = baseUrl;
-  }
   async getAvailableModels(apiKey) {
     try {
-      const response = await fetch("https://api.straico.com/v2/models", {
+      const response = await fetch("https://api.openai.com/v1/models", {
         method: "GET",
         headers: {
           "Authorization": `Bearer ${apiKey}`
         }
       });
       if (!response.ok) {
-        console.error("Failed to fetch Straico models:", response.status);
-        return [
-          { id: "openai/gpt-4o-mini", name: "OpenAI: GPT-4o Mini" },
-          { id: "openai/gpt-4o", name: "OpenAI: GPT-4o" },
-          { id: "anthropic/claude-3-haiku", name: "Anthropic: Claude 3 Haiku" }
-        ];
+        console.error("Failed to fetch OpenAI models:", response.status);
+        return _OpenAIProvider.FALLBACK_MODELS;
       }
       const data = await response.json();
       const models = data.data || [];
-      const filteredModels = models.filter((model) => {
-        return model.model_type === "chat" && model.id;
-      }).map((model) => {
-        const name = model.name || model.id;
-        return {
-          id: model.id,
-          name
-        };
+      return models.filter(
+        (model) => model.id.includes("gpt") && !model.id.includes("fine-tune") && !model.id.includes(":")
+      ).map((model) => {
+        let name = model.id.replace("gpt-", "GPT-").replace(/-/g, " ");
+        if (model.id.includes("4o"))
+          name += " (Omni)";
+        if (model.id.includes("turbo"))
+          name += " (Turbo)";
+        return { id: model.id, name };
       }).sort((a, b) => {
-        return a.name.localeCompare(b.name);
+        const order = ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"];
+        const aIndex = order.findIndex((id) => a.id.includes(id));
+        const bIndex = order.findIndex((id) => b.id.includes(id));
+        if (aIndex !== -1 && bIndex !== -1)
+          return aIndex - bIndex;
+        if (aIndex !== -1)
+          return -1;
+        if (bIndex !== -1)
+          return 1;
+        return a.id.localeCompare(b.id);
       });
-      return filteredModels;
     } catch (error) {
-      console.error("Failed to fetch Straico models:", error);
-      return [
-        { id: "openai/gpt-4o-mini", name: "OpenAI: GPT-4o Mini" },
-        { id: "openai/gpt-4o", name: "OpenAI: GPT-4o" },
-        { id: "anthropic/claude-3-haiku", name: "Anthropic: Claude 3 Haiku" }
-      ];
+      console.error("Failed to fetch OpenAI models:", error);
+      return _OpenAIProvider.FALLBACK_MODELS;
     }
+  }
+};
+var OpenAIProvider = _OpenAIProvider;
+OpenAIProvider.FALLBACK_MODELS = [
+  { id: "gpt-4o", name: "GPT-4o" },
+  { id: "gpt-4o-mini", name: "GPT-4o Mini" },
+  { id: "gpt-4-turbo", name: "GPT-4 Turbo" },
+  { id: "gpt-3.5-turbo", name: "GPT-3.5 Turbo" }
+];
+
+// src/providers/StraicoProvider.ts
+var _StraicoProvider = class extends BaseProvider {
+  constructor() {
+    super(...arguments);
+    this.name = "straico";
+    this.displayName = "Straico";
   }
   getDefaultBaseUrl() {
     return "https://api.straico.com/v1/prompt/completion";
@@ -547,20 +338,19 @@ var StraicoProvider = class {
   getMaxTokens() {
     return { default: 1500, max: 4e3 };
   }
-  extractContentFromResponse(data) {
+  extractStraicoContent(data) {
     var _a, _b, _c, _d, _e, _f, _g, _h;
     if ((_a = data.data) == null ? void 0 : _a.completions) {
       const completions = data.data.completions;
       const modelKeys = Object.keys(completions);
       if (modelKeys.length > 0) {
         const firstModelCompletion = completions[modelKeys[0]];
-        const content = (_e = (_d = (_c = (_b = firstModelCompletion == null ? void 0 : firstModelCompletion.completion) == null ? void 0 : _b.choices) == null ? void 0 : _c[0]) == null ? void 0 : _d.message) == null ? void 0 : _e.content;
-        return content || "";
+        return ((_e = (_d = (_c = (_b = firstModelCompletion == null ? void 0 : firstModelCompletion.completion) == null ? void 0 : _b.choices) == null ? void 0 : _c[0]) == null ? void 0 : _d.message) == null ? void 0 : _e.content) || "";
       }
     }
     return ((_h = (_g = (_f = data.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.message) == null ? void 0 : _h.content) || "";
   }
-  async callAPI(text, instruction, temperature, maxTokens = 2e3) {
+  async makeChatRequest(systemPrompt, userMessage, temperature, maxTokens) {
     const model = this.getModel();
     if (!model) {
       throw new Error("No model selected. Please select a model in the settings.");
@@ -570,9 +360,9 @@ var StraicoProvider = class {
     }
     const requestBody = {
       models: [model],
-      message: `${instruction}
+      message: `${systemPrompt}
 
-${text}`,
+${userMessage}`,
       temperature,
       max_tokens: maxTokens
     };
@@ -592,91 +382,7 @@ ${text}`,
     }
     const data = await response.json();
     console.log("Straico API Response:", data);
-    let result = this.extractContentFromResponse(data);
-    if (typeof result === "string") {
-      result = result.trim();
-    }
-    return result || text;
-  }
-  async getGrammarSuggestions(text, temperature) {
-    const model = this.getModel();
-    if (!model) {
-      throw new Error("No model selected. Please select a model in the settings.");
-    }
-    if (!this.getApiKey()) {
-      throw new Error("No API key configured. Please enter your Straico API key in the settings.");
-    }
-    const requestBody = {
-      models: [model],
-      message: `You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use \`\`\`json or \`\`\`. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]
-
-Please analyze this text for grammar and spelling issues: "${text}"`,
-      temperature,
-      max_tokens: 1500
-    };
-    console.log("Straico Grammar Request:", JSON.stringify(requestBody, null, 2));
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify(requestBody)
-    });
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("Straico Grammar API Error:", response.status, errorText);
-      throw new Error(`API error: ${response.status}, ${errorText}`);
-    }
-    const data = await response.json();
-    console.log("Straico Grammar Response:", data);
-    let content = this.extractContentFromResponse(data);
-    if (typeof content === "string") {
-      content = content.trim();
-      content = content.replace(/^```(?:json)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-      content = content.trim();
-      if (!content.startsWith("[") && !content.startsWith("{")) {
-        const jsonMatch = content.match(/\[[\s\S]*\]/);
-        if (jsonMatch) {
-          content = jsonMatch[0];
-        }
-      }
-    }
-    try {
-      const suggestions = JSON.parse(content);
-      return Array.isArray(suggestions) ? suggestions : [];
-    } catch (error) {
-      console.error("Failed to parse suggestions JSON:", error, "Content was:", content);
-      return [];
-    }
-  }
-  async getAutocompleteSuggestion(contextBefore, temperature, maxTokens) {
-    const response = await fetch(this.getBaseUrl(), {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${this.getApiKey()}`
-      },
-      body: JSON.stringify({
-        models: [this.getModel()],
-        message: `You are a professional writing assistant. Continue the text in a formal, professional tone. Use clear and concise language. Avoid casual phrases, slang, or overly conversational style. Write as if for a business document or professional publication. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum).
-
-Continue this text professionally: "${contextBefore}"`,
-        temperature,
-        max_tokens: maxTokens
-      })
-    });
-    if (!response.ok) {
-      throw new Error(`API error: ${response.status}`);
-    }
-    const data = await response.json();
-    let suggestion = this.extractContentFromResponse(data);
-    suggestion = suggestion.trim();
-    if (contextBefore.endsWith(" ") || contextBefore.endsWith("\n")) {
-      suggestion = suggestion.trimStart();
-    }
-    suggestion = removeDuplicatePrefix(contextBefore, suggestion);
-    return suggestion;
+    return this.extractStraicoContent(data) || "";
   }
   async testConnection(apiKey, model) {
     var _a;
@@ -687,7 +393,6 @@ Continue this text professionally: "${contextBefore}"`,
         temperature: this.getDefaultTemperature(),
         max_tokens: 50
       };
-      console.log("Straico Test Connection Request:", JSON.stringify(requestBody, null, 2));
       const response = await fetch(this.getBaseUrl(), {
         method: "POST",
         headers: {
@@ -696,30 +401,47 @@ Continue this text professionally: "${contextBefore}"`,
         },
         body: JSON.stringify(requestBody)
       });
-      console.log("Straico Test Connection Response Status:", response.status);
       if (!response.ok) {
-        const errorText = await response.text();
-        console.error("Straico Test Connection Error:", response.status, errorText);
         return false;
       }
       const data = await response.json();
-      console.log("Straico Test Connection Response:", data);
       return data.success === true && ((_a = data.data) == null ? void 0 : _a.completions) !== void 0;
-    } catch (error) {
-      console.error("Straico Test Connection Exception:", error);
+    } catch (e) {
       return false;
     }
   }
-  getApiKey() {
-    return this.apiKey;
-  }
-  getModel() {
-    return this.model || this.getDefaultModel();
-  }
-  getBaseUrl() {
-    return this.baseUrl || this.getDefaultBaseUrl();
+  async getAvailableModels(apiKey) {
+    try {
+      const response = await fetch("https://api.straico.com/v2/models", {
+        method: "GET",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`
+        }
+      });
+      if (!response.ok) {
+        console.error("Failed to fetch Straico models:", response.status);
+        return _StraicoProvider.FALLBACK_MODELS;
+      }
+      const data = await response.json();
+      const models = data.data || [];
+      return models.filter((model) => model.model_type === "chat" && model.id).map((model) => ({
+        id: model.id,
+        name: model.name || model.id
+      })).sort((a, b) => a.name.localeCompare(b.name));
+    } catch (error) {
+      console.error("Failed to fetch Straico models:", error);
+      return _StraicoProvider.FALLBACK_MODELS;
+    }
   }
 };
+var StraicoProvider = _StraicoProvider;
+StraicoProvider.FALLBACK_MODELS = [
+  { id: "openai/gpt-4o-mini", name: "OpenAI: GPT-4o Mini" },
+  { id: "openai/gpt-4o", name: "OpenAI: GPT-4o" },
+  { id: "anthropic/claude-3-haiku", name: "Anthropic: Claude 3 Haiku" }
+];
+
+// src/providers/index.ts
 var ProviderFactory = class {
   static getAvailableProviders() {
     return Object.keys(this.providers).map((key) => {
@@ -737,6 +459,9 @@ var ProviderFactory = class {
     }
     return providerFactory();
   }
+  static registerProvider(name, factory) {
+    this.providers[name] = factory;
+  }
 };
 ProviderFactory.providers = {
   "zai": () => new ZAIProvider(),
@@ -744,416 +469,174 @@ ProviderFactory.providers = {
   "straico": () => new StraicoProvider()
 };
 
-// main.ts
-var DEFAULT_SETTINGS = {
-  provider: "zai",
-  apiKeys: {
-    zai: "",
-    openai: "",
-    straico: ""
-  },
-  model: "GLM-4-32B-0414-128K",
-  baseUrl: "https://api.z.ai/api/paas/v4/chat/completions",
-  realTimeEnabled: true,
-  debounceMs: 1e3,
-  rateLimitBackoff: 6e4,
-  temperature: 0.1,
-  autocompleteEnabled: true,
-  autocompleteDebounceMs: 500,
-  autocompleteMaxTokens: 50
+// src/features/grammar/GrammarService.ts
+var import_obsidian = require("obsidian");
+var GrammarService = class {
+  constructor(getProvider, getSettings, getCurrentApiKey, handleRateLimit) {
+    this.getProvider = getProvider;
+    this.getSettings = getSettings;
+    this.getCurrentApiKey = getCurrentApiKey;
+    this.handleRateLimit = handleRateLimit;
+  }
+  async correctSelectedText(editor) {
+    const selectedText = editor.getSelection();
+    if (!selectedText) {
+      new import_obsidian.Notice("Please select some text to correct");
+      return;
+    }
+    new import_obsidian.Notice("Correcting grammar...");
+    const { leading, trailing, content: trimmedText } = extractWhitespace(selectedText);
+    const selectionStart = editor.getCursor("from");
+    const lineStart = { line: selectionStart.line, ch: 0 };
+    const textBeforeSelection = editor.getRange(lineStart, selectionStart);
+    const isStartOfSentence = isAtStartOfSentence(textBeforeSelection);
+    const startsWithLowercase = /^[a-z]/.test(trimmedText);
+    const contextInfo = `Context: This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}. The original text ${/^[A-Z]/.test(trimmedText) ? "starts with an uppercase letter" : startsWithLowercase ? "starts with a lowercase letter" : "does not start with a letter"}.`;
+    const corrected = await this.callAI(
+      trimmedText,
+      `Correct only the grammar and spelling errors in the following text.
+
+${contextInfo}
+
+IMPORTANT RULES:
+1. Return ONLY the corrected text with no explanations or commentary
+2. Do NOT add any formatting, markdown, or code blocks
+3. Do NOT add or remove line breaks
+4. Do NOT change the meaning or structure
+5. CAPITALIZATION RULES:
+   - If the text is in the MIDDLE of a sentence, keep the first letter lowercase (unless it's a proper noun)
+   - If the text is at the START of a sentence, capitalize the first letter
+   - Preserve proper nouns and acronyms
+6. If there are no errors, return the text exactly as is`
+    );
+    if (corrected) {
+      let cleanedResult = cleanAIResponse(corrected);
+      cleanedResult = preserveCapitalization(trimmedText, cleanedResult, isStartOfSentence);
+      const finalResult = leading + cleanedResult + trailing;
+      editor.replaceSelection(finalResult);
+      new import_obsidian.Notice("Grammar corrected");
+    }
+  }
+  async correctEntireDocument(editor) {
+    const fullText = editor.getValue();
+    if (!fullText.trim()) {
+      new import_obsidian.Notice("Document is empty");
+      return;
+    }
+    new import_obsidian.Notice("Correcting document grammar...");
+    const corrected = await this.callAI(
+      fullText,
+      "Correct only the grammar and spelling errors in the following markdown document. IMPORTANT RULES:\n1. Return ONLY the corrected document with no explanations or commentary\n2. Do NOT add any extra formatting or code blocks\n3. Preserve ALL markdown syntax exactly (headers, links, bold, italic, lists, code blocks, etc.)\n4. Do NOT change the document structure or add/remove sections\n5. Preserve the original line breaks and paragraph structure\n6. If there are no errors, return the text exactly as is"
+    );
+    if (corrected) {
+      let cleanedResult = cleanAIResponse(corrected);
+      cleanedResult = cleanedResult.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
+      if (cleanedResult !== fullText) {
+        editor.setValue(cleanedResult);
+        new import_obsidian.Notice("Document grammar corrected");
+      }
+    }
+  }
+  async improveWriting(editor) {
+    const selectedText = editor.getSelection();
+    if (!selectedText) {
+      new import_obsidian.Notice("Please select some text to improve");
+      return;
+    }
+    new import_obsidian.Notice("Improving writing...");
+    const { leading, trailing, content: trimmedText } = extractWhitespace(selectedText);
+    const selectionStart = editor.getCursor("from");
+    const lineStart = { line: selectionStart.line, ch: 0 };
+    const textBeforeSelection = editor.getRange(lineStart, selectionStart);
+    const isStartOfSentence = isAtStartOfSentence(textBeforeSelection);
+    const startsWithLowercase = /^[a-z]/.test(trimmedText);
+    const contextInfo = `Context: This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}.`;
+    const improved = await this.callAI(
+      trimmedText,
+      `Improve the clarity, style, and flow of the following text.
+
+${contextInfo}
+
+IMPORTANT RULES:
+1. Return ONLY the improved text with no explanations or commentary
+2. Do NOT add any formatting, markdown, or code blocks
+3. Do NOT add or remove line breaks
+4. Preserve the original meaning and key information
+5. Make it more professional and readable
+6. Do NOT change technical terms or proper nouns
+7. CAPITALIZATION RULES:
+   - If the text is in the MIDDLE of a sentence, keep the first letter lowercase (unless it's a proper noun)
+   - If the text is at the START of a sentence, capitalize the first letter`
+    );
+    if (improved) {
+      let cleanedResult = cleanAIResponse(improved);
+      cleanedResult = preserveCapitalization(trimmedText, cleanedResult, isStartOfSentence);
+      const finalResult = leading + cleanedResult + trailing;
+      editor.replaceSelection(finalResult);
+      new import_obsidian.Notice("Writing improved");
+    }
+  }
+  async callAI(text, instruction) {
+    const apiKey = this.getCurrentApiKey();
+    if (!apiKey) {
+      new import_obsidian.Notice("Please set your API key in the plugin settings");
+      return "";
+    }
+    const provider = this.getProvider();
+    if (!provider) {
+      new import_obsidian.Notice("No AI provider configured");
+      return text;
+    }
+    try {
+      console.log("Making API call with provider:", this.getSettings().provider);
+      console.log("Using model:", this.getSettings().model);
+      const result = await provider.callAPI(text, instruction, this.getSettings().temperature, 2e3);
+      console.log("Final processed result:", result);
+      return result;
+    } catch (error) {
+      console.error("AI API Error:", error);
+      if (error instanceof Error) {
+        if (error.message.includes("rate limit") || error.message.includes("429")) {
+          this.handleRateLimit();
+          new import_obsidian.Notice("Rate limit reached. Pausing requests temporarily.");
+        } else {
+          new import_obsidian.Notice("Failed to connect to AI service. Please check your settings.");
+        }
+      }
+      return text;
+    }
+  }
 };
-var AIGrammarAssistant = class extends import_obsidian.Plugin {
-  constructor() {
-    super(...arguments);
-    this.provider = null;
-    this.straicoproviderModels = [];
-    this.openaiModels = [];
+
+// src/features/grammar/RealTimeGrammarChecker.ts
+var import_obsidian2 = require("obsidian");
+var RealTimeGrammarChecker = class {
+  constructor(getProvider, getSettings, getCurrentApiKey, handleRateLimit, isRateLimited) {
+    this.getProvider = getProvider;
+    this.getSettings = getSettings;
+    this.getCurrentApiKey = getCurrentApiKey;
+    this.handleRateLimit = handleRateLimit;
+    this.isRateLimited = isRateLimited;
     this.debounceTimer = null;
-    this.activeEditor = null;
     this.currentSuggestions = [];
     this.suggestionMarkers = [];
-    this.rateLimitTimer = null;
-    this.isRateLimited = false;
-    this.autocompleteTimer = null;
-    this.currentAutocomplete = null;
-    this.ghostTextElement = null;
-    this.lastCursorPosition = 0;
-    this.autocompleteHintElement = null;
-    this.statusBarItem = null;
-    this.isAcceptingAutocomplete = false;
   }
-  async onload() {
-    await this.loadSettings();
-    this.setupRealTimeChecking();
-    this.setupAutocomplete();
-    this.registerEvent(
-      this.app.workspace.on("editor-menu", (menu, editor, view) => {
-        menu.addItem((item) => {
-          item.setTitle("Correct Grammar (Selected)").setIcon("spell-check").onClick(async () => {
-            await this.correctSelectedText(editor);
-          });
-        });
-        menu.addItem((item) => {
-          item.setTitle("Correct Grammar (Document)").setIcon("file-text").onClick(async () => {
-            await this.correctEntireDocument(editor);
-          });
-        });
-        menu.addItem((item) => {
-          item.setTitle("Improve Writing (Selected)").setIcon("pencil").onClick(async () => {
-            await this.improveWriting(editor);
-          });
-        });
-      })
-    );
-    this.addCommand({
-      id: "correct-selected-grammar",
-      name: "Correct Grammar (Selected Text)",
-      editorCallback: (editor, view) => {
-        this.correctSelectedText(editor);
-      }
-    });
-    this.addCommand({
-      id: "correct-document-grammar",
-      name: "Correct Grammar (Entire Document)",
-      editorCallback: (editor, view) => {
-        this.correctEntireDocument(editor);
-      }
-    });
-    this.addCommand({
-      id: "improve-writing",
-      name: "Improve Writing (Selected Text)",
-      editorCallback: (editor, view) => {
-        this.improveWriting(editor);
-      }
-    });
-    this.addCommand({
-      id: "trigger-autocomplete",
-      name: "Trigger AI Autocomplete",
-      editorCallback: (editor, view) => {
-        this.triggerAutocomplete(editor);
-      }
-    });
-    this.addCommand({
-      id: "accept-autocomplete",
-      name: "Accept Autocomplete Suggestion",
-      editorCallback: (editor, view) => {
-        if (this.currentAutocomplete) {
-          this.acceptAutocomplete();
-        } else {
-          new import_obsidian.Notice("No autocomplete suggestion available");
-        }
-      }
-    });
-    this.addCommand({
-      id: "debug-autocomplete",
-      name: "Debug: Test Autocomplete",
-      editorCallback: async (editor, view) => {
-        new import_obsidian.Notice("Testing autocomplete...");
-        console.log("=== AUTOCOMPLETE DEBUG ===");
-        console.log("API Key set:", !!this.getCurrentApiKey());
-        console.log("Autocomplete enabled:", this.settings.autocompleteEnabled);
-        console.log("Rate limited:", this.isRateLimited);
-        console.log("Current autocomplete:", this.currentAutocomplete);
-        const cursor = editor.getCursor();
-        const text = editor.getValue();
-        const offset = editor.posToOffset(cursor);
-        console.log("Cursor position:", offset);
-        console.log("Text length:", text.length);
-        console.log("Last 50 chars:", text.substring(Math.max(0, offset - 50), offset));
-        await this.getAutocompleteSuggestion(editor);
-      }
-    });
-    this.addSettingTab(new AISettingTab(this.app, this));
-    this.statusBarItem = this.addStatusBarItem();
-    this.statusBarItem.setText("");
-  }
-  onunload() {
-    if (this.debounceTimer) {
-      clearTimeout(this.debounceTimer);
-    }
-    if (this.rateLimitTimer) {
-      clearTimeout(this.rateLimitTimer);
-    }
-    if (this.autocompleteTimer) {
-      clearTimeout(this.autocompleteTimer);
-    }
-    this.clearSuggestionMarkers();
-    this.clearAutocomplete();
-  }
-  async loadSettings() {
-    const loadedData = await this.loadData();
-    if (loadedData && loadedData.apiKey && !loadedData.apiKeys) {
-      loadedData.apiKeys = {
-        zai: loadedData.apiKey,
-        openai: "",
-        straico: ""
-      };
-      delete loadedData.apiKey;
-      await this.saveData(loadedData);
-    }
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
-    this.initializeProvider();
-  }
-  async saveSettings() {
-    await this.saveData(this.settings);
-    this.initializeProvider();
-  }
-  initializeProvider() {
-    this.provider = ProviderFactory.createProvider(this.settings.provider);
-    if (this.provider) {
-      this.provider.setConfiguration(
-        this.getCurrentApiKey(),
-        this.settings.model,
-        this.settings.baseUrl
-      );
-    }
-  }
-  getCurrentApiKey() {
-    return this.settings.apiKeys[this.settings.provider] || "";
-  }
-  setCurrentApiKey(apiKey) {
-    this.settings.apiKeys[this.settings.provider] = apiKey;
-  }
-  setupRealTimeChecking() {
-    this.registerEvent(
-      this.app.workspace.on("active-leaf-change", (leaf) => {
-        if ((leaf == null ? void 0 : leaf.view) instanceof import_obsidian.MarkdownView) {
-          this.activeEditor = leaf.view.editor;
-          this.clearSuggestionMarkers();
-        } else {
-          this.activeEditor = null;
-          this.clearSuggestionMarkers();
-        }
-      })
-    );
-    this.registerEvent(
-      this.app.workspace.on("editor-change", (editor, view) => {
-        if (this.settings.realTimeEnabled && this.activeEditor === editor) {
-          this.debouncedGrammarCheck(editor);
-        }
-      })
-    );
-  }
-  setupAutocomplete() {
-    this.registerEvent(
-      this.app.workspace.on("editor-change", (editor, view) => {
-        if (this.settings.autocompleteEnabled && this.activeEditor === editor) {
-          this.debouncedAutocomplete(editor);
-        }
-      })
-    );
-    this.registerEvent(
-      this.app.workspace.on("editor-change", (editor, view) => {
-        if (this.activeEditor === editor) {
-          const cursor = editor.getCursor();
-          const newPos = editor.posToOffset(cursor);
-          if (newPos !== this.lastCursorPosition) {
-            this.lastCursorPosition = newPos;
-          }
-        }
-      })
-    );
-    this.registerDomEvent(document, "keydown", (evt) => {
-      if (this.currentAutocomplete) {
-        if (evt.key === "ArrowRight" && !evt.ctrlKey && !evt.metaKey && !evt.altKey) {
-          if (this.activeEditor) {
-            const cursor = this.activeEditor.getCursor();
-            const line = this.activeEditor.getLine(cursor.line);
-            if (cursor.ch >= line.length) {
-              evt.preventDefault();
-              evt.stopPropagation();
-              this.acceptAutocomplete();
-            }
-          }
-        } else if (evt.key === "Escape") {
-          this.clearAutocomplete();
-        } else if (evt.key.length === 1 && !evt.ctrlKey && !evt.metaKey && !evt.altKey) {
-          this.clearAutocomplete();
-        }
-      }
-    });
-  }
-  debouncedAutocomplete(editor) {
-    console.log("debouncedAutocomplete called");
-    if (this.isAcceptingAutocomplete) {
-      console.log("Autocomplete skipped: currently accepting a suggestion");
-      return;
-    }
-    if (this.autocompleteTimer) {
-      clearTimeout(this.autocompleteTimer);
-    }
-    this.clearAutocomplete();
-    this.updateStatusBar("\u23F3 Getting AI suggestion...");
-    this.autocompleteTimer = setTimeout(async () => {
-      await this.getAutocompleteSuggestion(editor);
-      this.updateStatusBar("");
-    }, this.settings.autocompleteDebounceMs);
-  }
-  async triggerAutocomplete(editor) {
-    if (!this.settings.autocompleteEnabled) {
-      new import_obsidian.Notice("Autocomplete is disabled. Enable it in settings.");
-      return;
-    }
-    new import_obsidian.Notice("Getting suggestion...");
-    this.updateStatusBar("\u23F3 Getting AI suggestion...");
-    await this.getAutocompleteSuggestion(editor);
-    this.updateStatusBar("");
-  }
-  updateStatusBar(text) {
-    if (this.statusBarItem) {
-      this.statusBarItem.setText(text);
-    }
-  }
-  async getAutocompleteSuggestion(editor) {
-    if (this.isRateLimited || !this.getCurrentApiKey()) {
-      console.log("Autocomplete skipped: rate limited or no API key");
-      return;
-    }
-    try {
-      const cursor = editor.getCursor();
-      const cursorOffset = editor.posToOffset(cursor);
-      const fullText = editor.getValue();
-      console.log("Autocomplete triggered at position:", cursorOffset);
-      const contextStart = Math.max(0, cursorOffset - 300);
-      const contextBefore = fullText.substring(contextStart, cursorOffset);
-      console.log("Context before cursor:", contextBefore.slice(-50));
-      const lastChar = contextBefore.slice(-1);
-      const shouldTrigger = !lastChar || /[\s\n.,!?;:]/.test(lastChar);
-      if (!shouldTrigger) {
-        console.log("Autocomplete skipped: cursor in middle of word");
-        return;
-      }
-      if (contextBefore.trim().length < 10) {
-        console.log("Autocomplete skipped: not enough context");
-        return;
-      }
-      console.log("Calling AI for autocomplete...");
-      const suggestion = await this.callAIForAutocomplete(contextBefore);
-      console.log("Received suggestion:", suggestion);
-      if (suggestion && suggestion.trim()) {
-        this.displayAutocomplete(editor, suggestion, cursorOffset);
-      } else {
-        console.log("No suggestion received");
-      }
-    } catch (error) {
-      console.error("Autocomplete error:", error);
-    }
-  }
-  async callAIForAutocomplete(contextBefore) {
-    if (!this.provider) {
-      throw new Error("No AI provider configured");
-    }
-    try {
-      const suggestion = await this.provider.getAutocompleteSuggestion(
-        contextBefore,
-        this.settings.temperature,
-        this.settings.autocompleteMaxTokens
-      );
-      return suggestion;
-    } catch (error) {
-      if (error.message.includes("429")) {
-        this.handleRateLimit();
-      }
-      throw error;
-    }
-  }
-  displayAutocomplete(editor, suggestion, cursorPos) {
-    this.clearAutocomplete();
-    console.log("Displaying autocomplete:", suggestion);
-    const cleanSuggestion = suggestion.replace(/^[\r\n]+/, "").trim();
-    this.currentAutocomplete = {
-      text: cleanSuggestion,
-      startPos: cursorPos
-    };
-    this.showAutocompleteHint(cleanSuggestion);
-    this.updateStatusBar("\u{1F4A1} Suggestion ready - Press \u2192 to accept");
-  }
-  escapeHtml(text) {
-    const div = document.createElement("div");
-    div.textContent = text;
-    return div.innerHTML;
-  }
-  showAutocompleteHint(suggestion) {
-    if (this.autocompleteHintElement && this.autocompleteHintElement.parentNode) {
-      this.autocompleteHintElement.parentNode.removeChild(this.autocompleteHintElement);
-    }
-    this.autocompleteHintElement = document.createElement("div");
-    this.autocompleteHintElement.className = "ai-autocomplete-hint";
-    const cleanSuggestion = suggestion.replace(/^[\r\n]+/, "").trim();
-    const preview = cleanSuggestion.length > 80 ? cleanSuggestion.substring(0, 80) + "..." : cleanSuggestion;
-    this.autocompleteHintElement.innerHTML = `
-			<div style="display: flex; flex-direction: column; gap: 8px; width: 100%;">
-				<div style="display: flex; align-items: center; gap: 8px;">
-					<span style="font-size: 18px;">\u{1F4A1}</span>
-					<span style="font-weight: 600; color: var(--text-normal); font-size: 14px;">AI Suggestion Available</span>
-				</div>
-				<div style="background: var(--background-secondary); padding: 10px 14px; border-radius: 6px; font-family: var(--font-text); font-size: 14px; line-height: 1.5; color: var(--text-muted); border-left: 3px solid #4a9eff;">
-					<span style="color: rgba(128,128,128,0.9); font-style: italic;">${this.escapeHtml(preview)}</span>
-				</div>
-				<div style="display: flex; gap: 16px; align-items: center; font-size: 12px; color: var(--text-muted);">
-					<span><kbd style="background: var(--background-modifier-border); padding: 3px 8px; border-radius: 4px; font-family: monospace; margin-right: 4px;">\u2192</kbd> Accept</span>
-					<span><kbd style="background: var(--background-modifier-border); padding: 3px 8px; border-radius: 4px; font-family: monospace; margin-right: 4px;">Esc</kbd> Dismiss</span>
-				</div>
-			</div>
-		`;
-    this.autocompleteHintElement.style.cssText = `
-			position: fixed;
-			right: 20px;
-			bottom: 40px;
-			background: var(--background-primary);
-			border: 1px solid var(--background-modifier-border);
-			border-radius: 8px;
-			padding: 12px 16px;
-			box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-			z-index: 10000;
-			max-width: 500px;
-			animation: slideIn 0.3s ease-out;
-		`;
-    document.body.appendChild(this.autocompleteHintElement);
-    console.log("Autocomplete hint displayed");
-  }
-  acceptAutocomplete() {
-    if (!this.currentAutocomplete || !this.activeEditor) {
-      return;
-    }
-    this.isAcceptingAutocomplete = true;
-    const editor = this.activeEditor;
-    const cursor = editor.getCursor();
-    let textToInsert = this.currentAutocomplete.text;
-    textToInsert = textToInsert.replace(/^[\r\n]+/, "");
-    textToInsert = textToInsert.trimStart();
-    console.log("Accepting autocomplete, original:", this.currentAutocomplete.text);
-    console.log("Cleaned text to insert:", textToInsert);
-    editor.replaceRange(textToInsert, cursor);
-    const newPos = {
-      line: cursor.line,
-      ch: cursor.ch + textToInsert.length
-    };
-    editor.setCursor(newPos);
-    new import_obsidian.Notice("\u2713 Suggestion accepted");
-    this.clearAutocomplete();
-    setTimeout(() => {
-      this.isAcceptingAutocomplete = false;
-    }, 500);
-  }
-  clearAutocomplete() {
-    if (this.autocompleteHintElement && this.autocompleteHintElement.parentNode) {
-      this.autocompleteHintElement.parentNode.removeChild(this.autocompleteHintElement);
-    }
-    this.autocompleteHintElement = null;
-    this.currentAutocomplete = null;
-    this.ghostTextElement = null;
-    this.updateStatusBar("");
-  }
-  debouncedGrammarCheck(editor) {
+  scheduleCheck(editor, callback) {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }
     this.debounceTimer = setTimeout(async () => {
-      await this.checkGrammarRealTime(editor);
-    }, this.settings.debounceMs);
+      await this.checkGrammar(editor);
+      callback();
+    }, this.getSettings().debounceMs);
   }
-  async checkGrammarRealTime(editor) {
+  cancelPendingCheck() {
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+  }
+  async checkGrammar(editor) {
     const text = editor.getValue();
     if (!text.trim()) {
       this.clearSuggestionMarkers();
@@ -1164,7 +647,7 @@ var AIGrammarAssistant = class extends import_obsidian.Plugin {
       console.log("API key not set, skipping grammar check");
       return;
     }
-    if (this.isRateLimited) {
+    if (this.isRateLimited()) {
       console.log("Rate limited, skipping grammar check");
       return;
     }
@@ -1178,76 +661,30 @@ var AIGrammarAssistant = class extends import_obsidian.Plugin {
       this.clearSuggestionMarkers();
       if (error instanceof Error) {
         if (error.message.includes("fetch")) {
-          new import_obsidian.Notice("Network error: Check your internet connection and API URL");
+          new import_obsidian2.Notice("Network error: Check your internet connection and API URL");
         } else if (error.message.includes("401") || error.message.includes("403")) {
-          new import_obsidian.Notice("Authentication error: Check your API key");
+          new import_obsidian2.Notice("Authentication error: Check your API key");
         } else if (error.message.includes("404")) {
-          new import_obsidian.Notice("API endpoint not found: Check your base URL setting");
+          new import_obsidian2.Notice("API endpoint not found: Check your base URL setting");
         } else if (error.message.includes("429") || error.message.includes("rate limit")) {
           this.handleRateLimit();
         } else {
-          new import_obsidian.Notice("Grammar check failed: " + error.message);
+          new import_obsidian2.Notice("Grammar check failed: " + error.message);
         }
       }
-    }
-  }
-  handleRateLimit() {
-    this.isRateLimited = true;
-    const backoffMs = this.settings.rateLimitBackoff;
-    const minutes = Math.ceil(backoffMs / 6e4);
-    new import_obsidian.Notice(`Rate limit reached. Pausing for ${minutes} minute(s) to avoid further limits.`);
-    if (this.rateLimitTimer) {
-      clearTimeout(this.rateLimitTimer);
-    }
-    this.rateLimitTimer = setTimeout(() => {
-      this.isRateLimited = false;
-      console.log("Rate limit cooldown ended, resuming grammar checks");
-    }, backoffMs);
-  }
-  async testApiConnection() {
-    if (!this.getCurrentApiKey()) {
-      new import_obsidian.Notice("Please set your API key first");
-      return false;
-    }
-    if (!this.provider) {
-      new import_obsidian.Notice("No AI provider configured");
-      return false;
-    }
-    try {
-      console.log("Testing API connection with provider:", this.settings.provider);
-      const success = await this.provider.testConnection(this.getCurrentApiKey(), this.settings.model);
-      if (success) {
-        new import_obsidian.Notice("API connection successful!");
-        return true;
-      } else {
-        new import_obsidian.Notice("API connection failed. Check your settings.");
-        return false;
-      }
-    } catch (error) {
-      console.error("Connection test failed:", error);
-      if (error instanceof Error) {
-        if (error.message.includes("fetch")) {
-          new import_obsidian.Notice("Network error: Check your internet connection and API URL");
-        } else if (error.message.includes("429")) {
-          new import_obsidian.Notice("Rate limit reached: Try again later or upgrade your plan");
-          this.handleRateLimit();
-        } else {
-          new import_obsidian.Notice("Connection failed: " + error.message);
-        }
-      }
-      return false;
     }
   }
   async getGrammarSuggestions(text) {
-    if (this.isRateLimited) {
+    if (this.isRateLimited()) {
       throw new Error("Rate limit in effect");
     }
-    if (!this.provider) {
+    const provider = this.getProvider();
+    if (!provider) {
       throw new Error("No AI provider configured");
     }
     console.log("Getting grammar suggestions for text length:", text.length);
     try {
-      const suggestions = await this.provider.getGrammarSuggestions(text, this.settings.temperature);
+      const suggestions = await provider.getGrammarSuggestions(text, this.getSettings().temperature);
       return suggestions;
     } catch (error) {
       if (error.message.includes("429") || error.message.includes("rate limit")) {
@@ -1281,12 +718,13 @@ var AIGrammarAssistant = class extends import_obsidian.Plugin {
       e.stopPropagation();
       this.showSuggestionPopup(editor, suggestion, marker);
     });
-    this.positionMarker(editor, marker, suggestion);
+    this.positionMarker(marker);
     this.suggestionMarkers.push(marker);
   }
-  positionMarker(editor, marker, suggestion) {
+  positionMarker(marker) {
+    var _a, _b, _c;
     try {
-      const activeView = this.app.workspace.getActiveViewOfType(import_obsidian.MarkdownView);
+      const activeView = (_c = (_b = (_a = window.app) == null ? void 0 : _a.workspace) == null ? void 0 : _b.getActiveViewOfType) == null ? void 0 : _c.call(_b, import_obsidian2.MarkdownView);
       if (activeView) {
         const container = activeView.containerEl.querySelector(".cm-editor");
         if (container) {
@@ -1346,11 +784,11 @@ var AIGrammarAssistant = class extends import_obsidian.Plugin {
       const originalText = editor.getRange(startPos, endPos);
       if (originalText === suggestion.original) {
         editor.replaceRange(suggestion.suggestion, startPos, endPos);
-        new import_obsidian.Notice("Applied suggestion");
+        new import_obsidian2.Notice("Applied suggestion");
       }
     } catch (error) {
       console.error("Failed to apply suggestion:", error);
-      new import_obsidian.Notice("Failed to apply suggestion");
+      new import_obsidian2.Notice("Failed to apply suggestion");
     }
   }
   clearSuggestionMarkers() {
@@ -1362,439 +800,258 @@ var AIGrammarAssistant = class extends import_obsidian.Plugin {
     this.suggestionMarkers = [];
     this.currentSuggestions = [];
   }
-  async callAI(text, instruction) {
-    if (!this.getCurrentApiKey()) {
-      new import_obsidian.Notice("Please set your API key in the plugin settings");
-      return "";
-    }
-    if (!this.provider) {
-      new import_obsidian.Notice("No AI provider configured");
-      return text;
-    }
-    try {
-      console.log("Making API call with provider:", this.settings.provider);
-      console.log("Using model:", this.settings.model);
-      console.log("Input text:", text);
-      console.log("Instruction:", instruction);
-      const result = await this.provider.callAPI(text, instruction, this.settings.temperature, 2e3);
-      console.log("Final processed result:", result);
-      return result;
-    } catch (error) {
-      console.error("AI API Error:", error);
-      if (error instanceof Error) {
-        if (error.message.includes("rate limit") || error.message.includes("429")) {
-          this.handleRateLimit();
-          new import_obsidian.Notice("Rate limit reached. Pausing requests temporarily.");
-        } else {
-          new import_obsidian.Notice("Failed to connect to AI service. Please check your settings.");
-        }
-      }
-      return text;
-    }
-  }
-  async correctSelectedText(editor) {
-    var _a, _b;
-    const selectedText = editor.getSelection();
-    if (!selectedText) {
-      new import_obsidian.Notice("Please select some text to correct");
-      return;
-    }
-    new import_obsidian.Notice("Correcting grammar...");
-    const leadingWhitespace = ((_a = selectedText.match(/^(\s*)/)) == null ? void 0 : _a[1]) || "";
-    const trailingWhitespace = ((_b = selectedText.match(/(\s*)$/)) == null ? void 0 : _b[1]) || "";
-    const selectionStart = editor.getCursor("from");
-    const selectionEnd = editor.getCursor("to");
-    const lineStart = { line: selectionStart.line, ch: 0 };
-    const textBeforeSelection = editor.getRange(lineStart, selectionStart);
-    const isStartOfLine = selectionStart.ch === 0;
-    const isAfterSentenceEnd = /[.!?]\s*$/.test(textBeforeSelection);
-    const isAfterNewline = /\n\s*$/.test(textBeforeSelection);
-    const isStartOfSentence = isStartOfLine || isAfterSentenceEnd || isAfterNewline;
-    const lineEnd = { line: selectionEnd.line, ch: editor.getLine(selectionEnd.line).length };
-    const textAfterSelection = editor.getRange(selectionEnd, lineEnd);
-    const isEndOfSentence = /[.!?]$/.test(selectedText.trim()) || textAfterSelection.match(/^\s*[.!?]/);
-    const trimmedText = selectedText.trim();
-    const startsWithLowercase = /^[a-z]/.test(trimmedText);
-    const startsWithUppercase = /^[A-Z]/.test(trimmedText);
-    const contextInfo = `Context: This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}. The original text ${startsWithUppercase ? "starts with an uppercase letter" : startsWithLowercase ? "starts with a lowercase letter" : "does not start with a letter"}.`;
-    const corrected = await this.callAI(
-      trimmedText,
-      `Correct only the grammar and spelling errors in the following text.
-
-${contextInfo}
-
-IMPORTANT RULES:
-1. Return ONLY the corrected text with no explanations or commentary
-2. Do NOT add any formatting, markdown, or code blocks
-3. Do NOT add or remove line breaks
-4. Do NOT change the meaning or structure
-5. CAPITALIZATION RULES:
-   - If the text is in the MIDDLE of a sentence, keep the first letter lowercase (unless it's a proper noun)
-   - If the text is at the START of a sentence, capitalize the first letter
-   - Preserve proper nouns and acronyms
-6. If there are no errors, return the text exactly as is`
-    );
-    if (corrected) {
-      let cleanedResult = corrected;
-      cleanedResult = cleanedResult.replace(/^```(?:\w*)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-      cleanedResult = cleanedResult.replace(/^(Here'?s? (is )?(the )?correct(ed)? (text|version|grammar)[:.]?\s*)/i, "");
-      cleanedResult = cleanedResult.replace(/^(Corrected (text|version|grammar)[:.]?\s*)/i, "");
-      cleanedResult = cleanedResult.trim();
-      if (!isStartOfSentence && startsWithLowercase && cleanedResult.length > 0) {
-        cleanedResult = cleanedResult.charAt(0).toLowerCase() + cleanedResult.slice(1);
-      }
-      const finalResult = leadingWhitespace + cleanedResult + trailingWhitespace;
-      editor.replaceSelection(finalResult);
-      new import_obsidian.Notice("Grammar corrected");
-    }
-  }
-  async correctEntireDocument(editor) {
-    const fullText = editor.getValue();
-    if (!fullText.trim()) {
-      new import_obsidian.Notice("Document is empty");
-      return;
-    }
-    new import_obsidian.Notice("Correcting document grammar...");
-    const corrected = await this.callAI(
-      fullText,
-      "Correct only the grammar and spelling errors in the following markdown document. IMPORTANT RULES:\n1. Return ONLY the corrected document with no explanations or commentary\n2. Do NOT add any extra formatting or code blocks\n3. Preserve ALL markdown syntax exactly (headers, links, bold, italic, lists, code blocks, etc.)\n4. Do NOT change the document structure or add/remove sections\n5. Preserve the original line breaks and paragraph structure\n6. If there are no errors, return the text exactly as is"
-    );
-    if (corrected) {
-      let cleanedResult = corrected;
-      cleanedResult = cleanedResult.replace(/^```(?:markdown|md)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-      if (cleanedResult !== fullText) {
-        editor.setValue(cleanedResult);
-        new import_obsidian.Notice("Document grammar corrected");
-      }
-    }
-  }
-  async improveWriting(editor) {
-    var _a, _b;
-    const selectedText = editor.getSelection();
-    if (!selectedText) {
-      new import_obsidian.Notice("Please select some text to improve");
-      return;
-    }
-    new import_obsidian.Notice("Improving writing...");
-    const leadingWhitespace = ((_a = selectedText.match(/^(\s*)/)) == null ? void 0 : _a[1]) || "";
-    const trailingWhitespace = ((_b = selectedText.match(/(\s*)$/)) == null ? void 0 : _b[1]) || "";
-    const selectionStart = editor.getCursor("from");
-    const selectionEnd = editor.getCursor("to");
-    const lineStart = { line: selectionStart.line, ch: 0 };
-    const textBeforeSelection = editor.getRange(lineStart, selectionStart);
-    const isStartOfLine = selectionStart.ch === 0;
-    const isAfterSentenceEnd = /[.!?]\s*$/.test(textBeforeSelection);
-    const isAfterNewline = /\n\s*$/.test(textBeforeSelection);
-    const isStartOfSentence = isStartOfLine || isAfterSentenceEnd || isAfterNewline;
-    const trimmedText = selectedText.trim();
-    const startsWithLowercase = /^[a-z]/.test(trimmedText);
-    const contextInfo = `Context: This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}.`;
-    const improved = await this.callAI(
-      trimmedText,
-      `Improve the clarity, style, and flow of the following text.
-
-${contextInfo}
-
-IMPORTANT RULES:
-1. Return ONLY the improved text with no explanations or commentary
-2. Do NOT add any formatting, markdown, or code blocks
-3. Do NOT add or remove line breaks
-4. Preserve the original meaning and key information
-5. Make it more professional and readable
-6. Do NOT change technical terms or proper nouns
-7. CAPITALIZATION RULES:
-   - If the text is in the MIDDLE of a sentence, keep the first letter lowercase (unless it's a proper noun)
-   - If the text is at the START of a sentence, capitalize the first letter`
-    );
-    if (improved) {
-      let cleanedResult = improved;
-      cleanedResult = cleanedResult.replace(/^```(?:\w*)?\s*\n?/i, "").replace(/\n?```\s*$/i, "");
-      cleanedResult = cleanedResult.replace(/^(Here'?s? (is )?(the )?improved (text|version|writing)[:.]?\s*)/i, "");
-      cleanedResult = cleanedResult.replace(/^(Improved (text|version|writing)[:.]?\s*)/i, "");
-      cleanedResult = cleanedResult.trim();
-      if (!isStartOfSentence && startsWithLowercase && cleanedResult.length > 0) {
-        cleanedResult = cleanedResult.charAt(0).toLowerCase() + cleanedResult.slice(1);
-      }
-      const finalResult = leadingWhitespace + cleanedResult + trailingWhitespace;
-      editor.replaceSelection(finalResult);
-      new import_obsidian.Notice("Writing improved");
-    }
+  destroy() {
+    this.cancelPendingCheck();
+    this.clearSuggestionMarkers();
   }
 };
-var AISettingTab = class extends import_obsidian.PluginSettingTab {
-  constructor(app, plugin) {
-    super(app, plugin);
-    this.plugin = plugin;
+
+// src/features/autocomplete/AutocompleteService.ts
+var import_obsidian3 = require("obsidian");
+var AutocompleteService = class {
+  constructor(getProvider, getSettings, getCurrentApiKey, handleRateLimit, isRateLimited, updateStatusBar) {
+    this.getProvider = getProvider;
+    this.getSettings = getSettings;
+    this.getCurrentApiKey = getCurrentApiKey;
+    this.handleRateLimit = handleRateLimit;
+    this.isRateLimited = isRateLimited;
+    this.updateStatusBar = updateStatusBar;
+    this.timer = null;
+    this.currentSuggestion = null;
+    this.hintElement = null;
+    this.isAccepting = false;
+    this.lastCursorPosition = 0;
   }
-  async createStraicoModelDropdown(modelSetting, containerEl) {
-    const currentApiKey = this.plugin.getCurrentApiKey();
-    if (!currentApiKey || currentApiKey.trim() === "") {
-      modelSetting.setDesc("Please enter an API key first to load available models");
-      modelSetting.addText((text) => text.setPlaceholder("Enter model ID manually").setValue(this.plugin.settings.model).onChange(async (value) => {
-        this.plugin.settings.model = value;
-        await this.plugin.saveSettings();
-      }));
+  scheduleAutocomplete(editor) {
+    if (this.isAccepting) {
+      console.log("Autocomplete skipped: currently accepting a suggestion");
       return;
     }
-    if (this.plugin.straicoproviderModels.length === 0) {
-      try {
-        modelSetting.setDesc("Loading available models...");
-        if (this.plugin.provider && "getAvailableModels" in this.plugin.provider) {
-          const provider = this.plugin.provider;
-          this.plugin.straicoproviderModels = await provider.getAvailableModels(currentApiKey);
-        }
-      } catch (error) {
-        console.error("Failed to load Straico models:", error);
-        modelSetting.setDesc("Failed to load models. Please check your API key and try again.");
-        modelSetting.addText((text) => text.setPlaceholder("Enter model ID manually").setValue(this.plugin.settings.model).onChange(async (value) => {
-          this.plugin.settings.model = value;
-          await this.plugin.saveSettings();
-        }));
-        return;
-      }
+    if (this.timer) {
+      clearTimeout(this.timer);
     }
-    modelSetting.setDesc("Select AI model to use");
-    modelSetting.addDropdown((dropdown) => {
-      this.plugin.straicoproviderModels.forEach((model) => {
-        dropdown.addOption(model.id, model.name);
-      });
-      dropdown.addOption("custom", "Custom (enter model ID manually)");
-      const currentValue = this.plugin.settings.model;
-      dropdown.setValue(currentValue);
-      dropdown.onChange(async (value) => {
-        if (value === "custom") {
-          const customModel = await this.showCustomModelDialog();
-          if (customModel) {
-            this.plugin.settings.model = customModel;
-          }
-        } else {
-          this.plugin.settings.model = value;
-        }
-        await this.plugin.saveSettings();
-        this.display();
-      });
-    });
+    this.clearAutocomplete();
+    this.updateStatusBar("\u23F3 Getting AI suggestion...");
+    this.timer = setTimeout(async () => {
+      await this.getSuggestion(editor);
+      this.updateStatusBar("");
+    }, this.getSettings().autocompleteDebounceMs);
   }
-  async showCustomModelDialog() {
-    return new Promise((resolve) => {
-      const modal = new CustomModelModal(this.app, (result) => {
-        resolve(result);
-      });
-      modal.open();
-    });
+  cancelScheduled() {
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
   }
-  async createOpenAIModelDropdown(modelSetting, containerEl) {
-    const currentApiKey = this.plugin.getCurrentApiKey();
-    if (!currentApiKey || currentApiKey.trim() === "") {
-      modelSetting.setDesc("Please enter an API key first to load available models");
-      modelSetting.addText((text) => text.setPlaceholder("Enter model name manually").setValue(this.plugin.settings.model).onChange(async (value) => {
-        this.plugin.settings.model = value;
-        await this.plugin.saveSettings();
-      }));
+  updateCursorPosition(position) {
+    this.lastCursorPosition = position;
+  }
+  async triggerManually(editor) {
+    if (!this.getSettings().autocompleteEnabled) {
+      new import_obsidian3.Notice("Autocomplete is disabled. Enable it in settings.");
       return;
     }
-    if (this.plugin.openaiModels.length === 0) {
-      try {
-        modelSetting.setDesc("Loading available models...");
-        if (this.plugin.provider && "getAvailableModels" in this.plugin.provider) {
-          const provider = this.plugin.provider;
-          this.plugin.openaiModels = await provider.getAvailableModels(currentApiKey);
-        }
-      } catch (error) {
-        console.error("Failed to load OpenAI models:", error);
-        modelSetting.setDesc("Failed to load models. Please check your API key and try again.");
-        modelSetting.addText((text) => text.setPlaceholder("Enter model name manually").setValue(this.plugin.settings.model).onChange(async (value) => {
-          this.plugin.settings.model = value;
-          await this.plugin.saveSettings();
-        }));
-        return;
-      }
-    }
-    modelSetting.setDesc("Select AI model to use");
-    modelSetting.addDropdown((dropdown) => {
-      this.plugin.openaiModels.forEach((model) => {
-        dropdown.addOption(model.id, model.name);
-      });
-      dropdown.addOption("custom", "Custom (enter model ID manually)");
-      const currentValue = this.plugin.settings.model;
-      dropdown.setValue(currentValue);
-      dropdown.onChange(async (value) => {
-        if (value === "custom") {
-          const customModel = await this.showCustomModelDialog();
-          if (customModel) {
-            this.plugin.settings.model = customModel;
-          }
-        } else {
-          this.plugin.settings.model = value;
-        }
-        await this.plugin.saveSettings();
-        this.display();
-      });
-    });
+    new import_obsidian3.Notice("Getting suggestion...");
+    this.updateStatusBar("\u23F3 Getting AI suggestion...");
+    await this.getSuggestion(editor);
+    this.updateStatusBar("");
   }
-  async createGenericModelDropdown(modelSetting, containerEl) {
-    const currentApiKey = this.plugin.getCurrentApiKey();
-    if (!currentApiKey || currentApiKey.trim() === "") {
-      modelSetting.setDesc("Please enter an API key first to load available models");
-      modelSetting.addText((text) => text.setPlaceholder("Enter model ID manually").setValue(this.plugin.settings.model).onChange(async (value) => {
-        this.plugin.settings.model = value;
-        await this.plugin.saveSettings();
-      }));
+  async getSuggestion(editor) {
+    if (this.isRateLimited() || !this.getCurrentApiKey()) {
+      console.log("Autocomplete skipped: rate limited or no API key");
       return;
     }
-    let models = [];
     try {
-      modelSetting.setDesc("Loading available models...");
-      if (this.plugin.provider && "getAvailableModels" in this.plugin.provider) {
-        const provider = this.plugin.provider;
-        models = await provider.getAvailableModels(currentApiKey);
+      const cursor = editor.getCursor();
+      const cursorOffset = editor.posToOffset(cursor);
+      const fullText = editor.getValue();
+      console.log("Autocomplete triggered at position:", cursorOffset);
+      const contextStart = Math.max(0, cursorOffset - 300);
+      const contextBefore = fullText.substring(contextStart, cursorOffset);
+      console.log("Context before cursor:", contextBefore.slice(-50));
+      if (!shouldTriggerAutocomplete(contextBefore, 10)) {
+        console.log("Autocomplete skipped: cursor in middle of word or not enough context");
+        return;
+      }
+      console.log("Calling AI for autocomplete...");
+      const suggestion = await this.callAI(contextBefore);
+      console.log("Received suggestion:", suggestion);
+      if (suggestion && suggestion.trim()) {
+        this.display(editor, suggestion, cursorOffset);
+      } else {
+        console.log("No suggestion received");
       }
     } catch (error) {
-      console.error("Failed to load models:", error);
-      modelSetting.setDesc("Failed to load models. Please check your API key and try again.");
-      modelSetting.addText((text) => text.setPlaceholder("Enter model ID manually").setValue(this.plugin.settings.model).onChange(async (value) => {
-        this.plugin.settings.model = value;
-        await this.plugin.saveSettings();
-      }));
+      console.error("Autocomplete error:", error);
+    }
+  }
+  async callAI(contextBefore) {
+    const provider = this.getProvider();
+    if (!provider) {
+      throw new Error("No AI provider configured");
+    }
+    try {
+      const suggestion = await provider.getAutocompleteSuggestion(
+        contextBefore,
+        this.getSettings().temperature,
+        this.getSettings().autocompleteMaxTokens
+      );
+      return suggestion;
+    } catch (error) {
+      if (error.message.includes("429")) {
+        this.handleRateLimit();
+      }
+      throw error;
+    }
+  }
+  display(editor, suggestion, cursorPos) {
+    this.clearAutocomplete();
+    console.log("Displaying autocomplete:", suggestion);
+    const cleanSuggestion = suggestion.replace(/^[\r\n]+/, "").trim();
+    this.currentSuggestion = {
+      text: cleanSuggestion,
+      startPos: cursorPos
+    };
+    this.showHint(cleanSuggestion);
+    this.updateStatusBar("\u{1F4A1} Suggestion ready - Press \u2192 to accept");
+  }
+  showHint(suggestion) {
+    if (this.hintElement && this.hintElement.parentNode) {
+      this.hintElement.parentNode.removeChild(this.hintElement);
+    }
+    this.hintElement = document.createElement("div");
+    this.hintElement.className = "ai-autocomplete-hint";
+    const cleanSuggestion = suggestion.replace(/^[\r\n]+/, "").trim();
+    const preview = cleanSuggestion.length > 80 ? cleanSuggestion.substring(0, 80) + "..." : cleanSuggestion;
+    this.hintElement.innerHTML = `
+			<div style="display: flex; flex-direction: column; gap: 8px; width: 100%;">
+				<div style="display: flex; align-items: center; gap: 8px;">
+					<span style="font-size: 18px;">\u{1F4A1}</span>
+					<span style="font-weight: 600; color: var(--text-normal); font-size: 14px;">AI Suggestion Available</span>
+				</div>
+				<div style="background: var(--background-secondary); padding: 10px 14px; border-radius: 6px; font-family: var(--font-text); font-size: 14px; line-height: 1.5; color: var(--text-muted); border-left: 3px solid #4a9eff;">
+					<span style="color: rgba(128,128,128,0.9); font-style: italic;">${escapeHtml(preview)}</span>
+				</div>
+				<div style="display: flex; gap: 16px; align-items: center; font-size: 12px; color: var(--text-muted);">
+					<span><kbd style="background: var(--background-modifier-border); padding: 3px 8px; border-radius: 4px; font-family: monospace; margin-right: 4px;">\u2192</kbd> Accept</span>
+					<span><kbd style="background: var(--background-modifier-border); padding: 3px 8px; border-radius: 4px; font-family: monospace; margin-right: 4px;">Esc</kbd> Dismiss</span>
+				</div>
+			</div>
+		`;
+    this.hintElement.style.cssText = `
+			position: fixed;
+			right: 20px;
+			bottom: 40px;
+			background: var(--background-primary);
+			border: 1px solid var(--background-modifier-border);
+			border-radius: 8px;
+			padding: 12px 16px;
+			box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+			z-index: 10000;
+			max-width: 500px;
+			animation: slideIn 0.3s ease-out;
+		`;
+    document.body.appendChild(this.hintElement);
+    console.log("Autocomplete hint displayed");
+  }
+  handleKeyDown(evt, editor) {
+    if (!this.currentSuggestion)
+      return false;
+    if (evt.key === "ArrowRight" && !evt.ctrlKey && !evt.metaKey && !evt.altKey) {
+      if (editor) {
+        const cursor = editor.getCursor();
+        const line = editor.getLine(cursor.line);
+        if (cursor.ch >= line.length) {
+          evt.preventDefault();
+          evt.stopPropagation();
+          this.accept(editor);
+          return true;
+        }
+      }
+    } else if (evt.key === "Escape") {
+      this.clearAutocomplete();
+      return true;
+    } else if (evt.key.length === 1 && !evt.ctrlKey && !evt.metaKey && !evt.altKey) {
+      this.clearAutocomplete();
+    }
+    return false;
+  }
+  accept(editor) {
+    if (!this.currentSuggestion) {
       return;
     }
-    modelSetting.setDesc("Select AI model to use");
-    modelSetting.addDropdown((dropdown) => {
-      models.forEach((model) => {
-        dropdown.addOption(model.id, model.name);
-      });
-      dropdown.addOption("custom", "Custom (enter model ID manually)");
-      const currentValue = this.plugin.settings.model;
-      dropdown.setValue(currentValue);
-      dropdown.onChange(async (value) => {
-        if (value === "custom") {
-          const customModel = await this.showCustomModelDialog();
-          if (customModel) {
-            this.plugin.settings.model = customModel;
-          }
-        } else {
-          this.plugin.settings.model = value;
-        }
-        await this.plugin.saveSettings();
-        this.display();
-      });
-    });
+    this.isAccepting = true;
+    const cursor = editor.getCursor();
+    let textToInsert = this.currentSuggestion.text;
+    textToInsert = textToInsert.replace(/^[\r\n]+/, "");
+    textToInsert = textToInsert.trimStart();
+    console.log("Accepting autocomplete, original:", this.currentSuggestion.text);
+    console.log("Cleaned text to insert:", textToInsert);
+    editor.replaceRange(textToInsert, cursor);
+    const newPos = {
+      line: cursor.line,
+      ch: cursor.ch + textToInsert.length
+    };
+    editor.setCursor(newPos);
+    new import_obsidian3.Notice("\u2713 Suggestion accepted");
+    this.clearAutocomplete();
+    setTimeout(() => {
+      this.isAccepting = false;
+    }, 500);
   }
-  display() {
-    var _a;
-    const { containerEl } = this;
-    containerEl.empty();
-    containerEl.createEl("h2", { text: "AI Grammar Assistant Settings" });
-    new import_obsidian.Setting(containerEl).setName("AI Provider").setDesc("Select the AI service provider to use for grammar checking and suggestions").addDropdown((dropdown) => {
-      const providers = ProviderFactory.getAvailableProviders();
-      providers.forEach((provider) => {
-        dropdown.addOption(provider.name, provider.displayName);
-      });
-      dropdown.setValue(this.plugin.settings.provider).onChange(async (value) => {
-        this.plugin.settings.provider = value;
-        this.plugin.straicoproviderModels = [];
-        this.plugin.openaiModels = [];
-        const newProvider = ProviderFactory.createProvider(value);
-        if (newProvider) {
-          this.plugin.settings.baseUrl = newProvider.getDefaultBaseUrl();
-          this.plugin.settings.model = newProvider.getDefaultModel();
-          this.plugin.settings.temperature = newProvider.getDefaultTemperature();
-        }
-        await this.plugin.saveSettings();
-        this.display();
-      });
-    });
-    new import_obsidian.Setting(containerEl).setName("API Key").setDesc(`Your ${((_a = this.plugin.provider) == null ? void 0 : _a.displayName) || "AI"} service API key`).addText((text) => text.setPlaceholder("Enter your API key").setValue(this.plugin.getCurrentApiKey()).onChange(async (value) => {
-      const oldProvider = this.plugin.settings.provider;
-      this.plugin.setCurrentApiKey(value);
-      await this.plugin.saveSettings();
-      if (oldProvider === "straico") {
-        this.plugin.straicoproviderModels = [];
-      } else if (oldProvider === "openai") {
-        this.plugin.openaiModels = [];
-      }
-      this.display();
-    }));
-    const modelSetting = new import_obsidian.Setting(containerEl).setName("Model").setDesc("AI model to use");
-    if (this.plugin.provider && "getAvailableModels" in this.plugin.provider) {
-      if (this.plugin.settings.provider === "straico") {
-        this.createStraicoModelDropdown(modelSetting, containerEl);
-      } else if (this.plugin.settings.provider === "openai") {
-        this.createOpenAIModelDropdown(modelSetting, containerEl);
-      } else {
-        this.createGenericModelDropdown(modelSetting, containerEl);
-      }
-    } else {
-      modelSetting.addText((text) => text.setPlaceholder("Enter model name").setValue(this.plugin.settings.model).onChange(async (value) => {
-        this.plugin.settings.model = value;
-        await this.plugin.saveSettings();
-      }));
+  hasSuggestion() {
+    return this.currentSuggestion !== null;
+  }
+  clearAutocomplete() {
+    if (this.hintElement && this.hintElement.parentNode) {
+      this.hintElement.parentNode.removeChild(this.hintElement);
     }
-    new import_obsidian.Setting(containerEl).setName("Base URL").setDesc("API endpoint URL").addText((text) => text.setPlaceholder("https://api.z.ai/api/paas/v4/chat/completions").setValue(this.plugin.settings.baseUrl).onChange(async (value) => {
-      this.plugin.settings.baseUrl = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Temperature").setDesc("Controls randomness in AI responses (0.0 = deterministic, 1.0 = creative)").addSlider((slider) => slider.setLimits(0, 1, 0.1).setValue(this.plugin.settings.temperature).setDynamicTooltip().onChange(async (value) => {
-      this.plugin.settings.temperature = value;
-      await this.plugin.saveSettings();
-    }));
-    containerEl.createEl("h3", { text: "Real-time Grammar Checking" });
-    new import_obsidian.Setting(containerEl).setName("Enable Real-time Checking").setDesc("Automatically check grammar as you type").addToggle((toggle) => toggle.setValue(this.plugin.settings.realTimeEnabled).onChange(async (value) => {
-      this.plugin.settings.realTimeEnabled = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Debounce Delay (ms)").setDesc("Delay before checking grammar after typing stops").addSlider((slider) => slider.setLimits(500, 3e3, 100).setValue(this.plugin.settings.debounceMs).setDynamicTooltip().onChange(async (value) => {
-      this.plugin.settings.debounceMs = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Rate Limit Backoff (minutes)").setDesc("How long to pause when rate limit is reached").addSlider((slider) => slider.setLimits(1, 60, 1).setValue(this.plugin.settings.rateLimitBackoff / 6e4).setDynamicTooltip().onChange(async (value) => {
-      this.plugin.settings.rateLimitBackoff = value * 6e4;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Test API Connection").setDesc("Test if your API settings are working correctly").addButton((button) => button.setButtonText("Test Connection").onClick(async () => {
-      button.setDisabled(true);
-      button.setButtonText("Testing...");
-      const success = await this.plugin.testApiConnection();
-      if (success) {
-        button.setButtonText("\u2713 Connected");
-        new import_obsidian.Notice("API connection successful!");
-      } else {
-        button.setButtonText("\u2717 Failed");
-        new import_obsidian.Notice("API connection failed. Check your settings.");
-      }
-      setTimeout(() => {
-        button.setDisabled(false);
-        button.setButtonText("Test Connection");
-      }, 3e3);
-    }));
-    containerEl.createEl("h3", { text: "AI Autocomplete / IntelliSense" });
-    new import_obsidian.Setting(containerEl).setName("Enable Autocomplete").setDesc("Show AI-powered text predictions as you type").addToggle((toggle) => toggle.setValue(this.plugin.settings.autocompleteEnabled).onChange(async (value) => {
-      this.plugin.settings.autocompleteEnabled = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Autocomplete Delay (ms)").setDesc("Delay before showing suggestions after you stop typing").addSlider((slider) => slider.setLimits(200, 2e3, 100).setValue(this.plugin.settings.autocompleteDebounceMs).setDynamicTooltip().onChange(async (value) => {
-      this.plugin.settings.autocompleteDebounceMs = value;
-      await this.plugin.saveSettings();
-    }));
-    new import_obsidian.Setting(containerEl).setName("Max Suggestion Length (tokens)").setDesc("Maximum length of autocomplete suggestions").addSlider((slider) => slider.setLimits(10, 100, 5).setValue(this.plugin.settings.autocompleteMaxTokens).setDynamicTooltip().onChange(async (value) => {
-      this.plugin.settings.autocompleteMaxTokens = value;
-      await this.plugin.saveSettings();
-    }));
-    containerEl.createEl("p", { text: "\u{1F4A1} Press \u2192 (Right Arrow) to accept suggestions, Esc to dismiss" });
-    containerEl.createEl("p", { text: "Ghost text will appear in gray at your cursor position" });
-    containerEl.createEl("h3", { text: "How to get started:" });
-    if (this.plugin.settings.provider === "zai") {
-      containerEl.createEl("p", { text: "1. Get an API key from Zhipu AI (https://z.ai/manage-apikey/apikey-list)" });
-    } else if (this.plugin.settings.provider === "openai") {
-      containerEl.createEl("p", { text: "1. Get an API key from OpenAI (https://platform.openai.com/api-keys)" });
-    } else if (this.plugin.settings.provider === "straico") {
-      containerEl.createEl("p", { text: "1. Get an API key from Straico (https://straico.com/)" });
-    }
-    containerEl.createEl("p", { text: "2. Select your provider above and enter your API key" });
-    containerEl.createEl("p", { text: "3. Right-click on any note or selected text to use the AI assistant" });
+    this.hintElement = null;
+    this.currentSuggestion = null;
+    this.updateStatusBar("");
+  }
+  destroy() {
+    this.cancelScheduled();
+    this.clearAutocomplete();
   }
 };
-var CustomModelModal = class extends import_obsidian.Modal {
+
+// src/settings/defaults.ts
+var DEFAULT_SETTINGS = {
+  provider: "zai",
+  apiKeys: {
+    zai: "",
+    openai: "",
+    straico: ""
+  },
+  model: "GLM-4-32B-0414-128K",
+  baseUrl: "https://api.z.ai/api/paas/v4/chat/completions",
+  realTimeEnabled: true,
+  debounceMs: 1e3,
+  rateLimitBackoff: 6e4,
+  temperature: 0.1,
+  autocompleteEnabled: true,
+  autocompleteDebounceMs: 500,
+  autocompleteMaxTokens: 50
+};
+function migrateSettings(loadedData) {
+  if (loadedData && loadedData.apiKey && !loadedData.apiKeys) {
+    loadedData.apiKeys = {
+      zai: loadedData.apiKey,
+      openai: "",
+      straico: ""
+    };
+    delete loadedData.apiKey;
+  }
+  return Object.assign({}, DEFAULT_SETTINGS, loadedData);
+}
+
+// src/settings/SettingsTab.ts
+var import_obsidian5 = require("obsidian");
+
+// src/ui/modals/CustomModelModal.ts
+var import_obsidian4 = require("obsidian");
+var CustomModelModal = class extends import_obsidian4.Modal {
   constructor(app, onSubmit) {
     super(app);
     this.onSubmit = onSubmit;
@@ -1804,7 +1061,7 @@ var CustomModelModal = class extends import_obsidian.Modal {
     contentEl.createEl("h2", { text: "Enter Custom Model ID" });
     const inputContainer = contentEl.createDiv();
     inputContainer.createEl("p", {
-      text: 'Enter the Straico model ID (e.g., "openai/gpt-4o"):'
+      text: 'Enter the model ID (e.g., "openai/gpt-4o"):'
     });
     this.inputEl = inputContainer.createEl("input", {
       type: "text",
@@ -1842,5 +1099,472 @@ var CustomModelModal = class extends import_obsidian.Modal {
   onClose() {
     const { contentEl } = this;
     contentEl.empty();
+  }
+};
+
+// src/settings/SettingsTab.ts
+var AISettingsTab = class extends import_obsidian5.PluginSettingTab {
+  constructor(app, containerElement, deps) {
+    super(app, containerElement);
+    this.containerElement = containerElement;
+    this.deps = deps;
+  }
+  display() {
+    const { containerEl } = this;
+    containerEl.empty();
+    containerEl.createEl("h2", { text: "AI Grammar Assistant Settings" });
+    this.createProviderSettings(containerEl);
+    this.createModelSettings(containerEl);
+    this.createAdvancedSettings(containerEl);
+    this.createRealTimeSettings(containerEl);
+    this.createAutocompleteSettings(containerEl);
+    this.createGettingStartedSection(containerEl);
+  }
+  createProviderSettings(containerEl) {
+    var _a;
+    new import_obsidian5.Setting(containerEl).setName("AI Provider").setDesc("Select the AI service provider to use for grammar checking and suggestions").addDropdown((dropdown) => {
+      const providers = ProviderFactory.getAvailableProviders();
+      providers.forEach((provider) => {
+        dropdown.addOption(provider.name, provider.displayName);
+      });
+      dropdown.setValue(this.deps.getSettings().provider).onChange(async (value) => {
+        this.deps.getSettings().provider = value;
+        this.deps.clearModelCache();
+        const newProvider = ProviderFactory.createProvider(value);
+        if (newProvider) {
+          this.deps.getSettings().baseUrl = newProvider.getDefaultBaseUrl();
+          this.deps.getSettings().model = newProvider.getDefaultModel();
+          this.deps.getSettings().temperature = newProvider.getDefaultTemperature();
+        }
+        await this.deps.saveSettings();
+        this.display();
+      });
+    });
+    new import_obsidian5.Setting(containerEl).setName("API Key").setDesc(`Your ${((_a = this.deps.getProvider()) == null ? void 0 : _a.displayName) || "AI"} service API key`).addText((text) => text.setPlaceholder("Enter your API key").setValue(this.deps.getCurrentApiKey()).onChange(async (value) => {
+      this.deps.setCurrentApiKey(value);
+      await this.deps.saveSettings();
+      this.display();
+    }));
+  }
+  createModelSettings(containerEl) {
+    const modelSetting = new import_obsidian5.Setting(containerEl).setName("Model").setDesc("AI model to use");
+    const provider = this.deps.getProvider();
+    if (provider && "getAvailableModels" in provider) {
+      this.createModelDropdown(modelSetting, containerEl);
+    } else {
+      modelSetting.addText((text) => text.setPlaceholder("Enter model name").setValue(this.deps.getSettings().model).onChange(async (value) => {
+        this.deps.getSettings().model = value;
+        await this.deps.saveSettings();
+      }));
+    }
+    new import_obsidian5.Setting(containerEl).setName("Base URL").setDesc("API endpoint URL").addText((text) => text.setPlaceholder("https://api.z.ai/api/paas/v4/chat/completions").setValue(this.deps.getSettings().baseUrl).onChange(async (value) => {
+      this.deps.getSettings().baseUrl = value;
+      await this.deps.saveSettings();
+    }));
+  }
+  async createModelDropdown(modelSetting, containerEl) {
+    const currentApiKey = this.deps.getCurrentApiKey();
+    if (!currentApiKey || currentApiKey.trim() === "") {
+      modelSetting.setDesc("Please enter an API key first to load available models");
+      modelSetting.addText((text) => text.setPlaceholder("Enter model ID manually").setValue(this.deps.getSettings().model).onChange(async (value) => {
+        this.deps.getSettings().model = value;
+        await this.deps.saveSettings();
+      }));
+      return;
+    }
+    let models = [];
+    const provider = this.deps.getProvider();
+    const settings = this.deps.getSettings();
+    if (settings.provider === "straico" && this.deps.straicoModels.length > 0) {
+      models = this.deps.straicoModels;
+    } else if (settings.provider === "openai" && this.deps.openaiModels.length > 0) {
+      models = this.deps.openaiModels;
+    } else if (provider && "getAvailableModels" in provider) {
+      try {
+        modelSetting.setDesc("Loading available models...");
+        models = await provider.getAvailableModels(currentApiKey);
+        if (settings.provider === "straico") {
+          this.deps.straicoModels = models;
+        } else if (settings.provider === "openai") {
+          this.deps.openaiModels = models;
+        }
+      } catch (error) {
+        console.error("Failed to load models:", error);
+        modelSetting.setDesc("Failed to load models. Please check your API key and try again.");
+        modelSetting.addText((text) => text.setPlaceholder("Enter model ID manually").setValue(this.deps.getSettings().model).onChange(async (value) => {
+          this.deps.getSettings().model = value;
+          await this.deps.saveSettings();
+        }));
+        return;
+      }
+    }
+    modelSetting.setDesc("Select AI model to use");
+    modelSetting.addDropdown((dropdown) => {
+      models.forEach((model) => {
+        dropdown.addOption(model.id, model.name);
+      });
+      dropdown.addOption("custom", "Custom (enter model ID manually)");
+      dropdown.setValue(this.deps.getSettings().model);
+      dropdown.onChange(async (value) => {
+        if (value === "custom") {
+          const customModel = await this.showCustomModelDialog();
+          if (customModel) {
+            this.deps.getSettings().model = customModel;
+          }
+        } else {
+          this.deps.getSettings().model = value;
+        }
+        await this.deps.saveSettings();
+        this.display();
+      });
+    });
+  }
+  async showCustomModelDialog() {
+    return new Promise((resolve) => {
+      const modal = new CustomModelModal(this.app, (result) => {
+        resolve(result);
+      });
+      modal.open();
+    });
+  }
+  createAdvancedSettings(containerEl) {
+    new import_obsidian5.Setting(containerEl).setName("Temperature").setDesc("Controls randomness in AI responses (0.0 = deterministic, 1.0 = creative)").addSlider((slider) => slider.setLimits(0, 1, 0.1).setValue(this.deps.getSettings().temperature).setDynamicTooltip().onChange(async (value) => {
+      this.deps.getSettings().temperature = value;
+      await this.deps.saveSettings();
+    }));
+    new import_obsidian5.Setting(containerEl).setName("Test API Connection").setDesc("Test if your API settings are working correctly").addButton((button) => button.setButtonText("Test Connection").onClick(async () => {
+      button.setDisabled(true);
+      button.setButtonText("Testing...");
+      const success = await this.deps.testApiConnection();
+      if (success) {
+        button.setButtonText("\u2713 Connected");
+        new import_obsidian5.Notice("API connection successful!");
+      } else {
+        button.setButtonText("\u2717 Failed");
+        new import_obsidian5.Notice("API connection failed. Check your settings.");
+      }
+      setTimeout(() => {
+        button.setDisabled(false);
+        button.setButtonText("Test Connection");
+      }, 3e3);
+    }));
+  }
+  createRealTimeSettings(containerEl) {
+    containerEl.createEl("h3", { text: "Real-time Grammar Checking" });
+    new import_obsidian5.Setting(containerEl).setName("Enable Real-time Checking").setDesc("Automatically check grammar as you type").addToggle((toggle) => toggle.setValue(this.deps.getSettings().realTimeEnabled).onChange(async (value) => {
+      this.deps.getSettings().realTimeEnabled = value;
+      await this.deps.saveSettings();
+    }));
+    new import_obsidian5.Setting(containerEl).setName("Debounce Delay (ms)").setDesc("Delay before checking grammar after typing stops").addSlider((slider) => slider.setLimits(500, 3e3, 100).setValue(this.deps.getSettings().debounceMs).setDynamicTooltip().onChange(async (value) => {
+      this.deps.getSettings().debounceMs = value;
+      await this.deps.saveSettings();
+    }));
+    new import_obsidian5.Setting(containerEl).setName("Rate Limit Backoff (minutes)").setDesc("How long to pause when rate limit is reached").addSlider((slider) => slider.setLimits(1, 60, 1).setValue(this.deps.getSettings().rateLimitBackoff / 6e4).setDynamicTooltip().onChange(async (value) => {
+      this.deps.getSettings().rateLimitBackoff = value * 6e4;
+      await this.deps.saveSettings();
+    }));
+  }
+  createAutocompleteSettings(containerEl) {
+    containerEl.createEl("h3", { text: "AI Autocomplete / IntelliSense" });
+    new import_obsidian5.Setting(containerEl).setName("Enable Autocomplete").setDesc("Show AI-powered text predictions as you type").addToggle((toggle) => toggle.setValue(this.deps.getSettings().autocompleteEnabled).onChange(async (value) => {
+      this.deps.getSettings().autocompleteEnabled = value;
+      await this.deps.saveSettings();
+    }));
+    new import_obsidian5.Setting(containerEl).setName("Autocomplete Delay (ms)").setDesc("Delay before showing suggestions after you stop typing").addSlider((slider) => slider.setLimits(200, 2e3, 100).setValue(this.deps.getSettings().autocompleteDebounceMs).setDynamicTooltip().onChange(async (value) => {
+      this.deps.getSettings().autocompleteDebounceMs = value;
+      await this.deps.saveSettings();
+    }));
+    new import_obsidian5.Setting(containerEl).setName("Max Suggestion Length (tokens)").setDesc("Maximum length of autocomplete suggestions").addSlider((slider) => slider.setLimits(10, 100, 5).setValue(this.deps.getSettings().autocompleteMaxTokens).setDynamicTooltip().onChange(async (value) => {
+      this.deps.getSettings().autocompleteMaxTokens = value;
+      await this.deps.saveSettings();
+    }));
+    containerEl.createEl("p", { text: "\u{1F4A1} Press \u2192 (Right Arrow) to accept suggestions, Esc to dismiss" });
+    containerEl.createEl("p", { text: "Ghost text will appear in gray at your cursor position" });
+  }
+  createGettingStartedSection(containerEl) {
+    containerEl.createEl("h3", { text: "How to get started:" });
+    const provider = this.deps.getSettings().provider;
+    if (provider === "zai") {
+      containerEl.createEl("p", { text: "1. Get an API key from Zhipu AI (https://z.ai/manage-apikey/apikey-list)" });
+    } else if (provider === "openai") {
+      containerEl.createEl("p", { text: "1. Get an API key from OpenAI (https://platform.openai.com/api-keys)" });
+    } else if (provider === "straico") {
+      containerEl.createEl("p", { text: "1. Get an API key from Straico (https://straico.com/)" });
+    }
+    containerEl.createEl("p", { text: "2. Select your provider above and enter your API key" });
+    containerEl.createEl("p", { text: "3. Right-click on any note or selected text to use the AI assistant" });
+  }
+};
+
+// src/index.ts
+var AIGrammarAssistant = class extends import_obsidian6.Plugin {
+  constructor() {
+    super(...arguments);
+    this.provider = null;
+    this.straicoModels = [];
+    this.openaiModels = [];
+    this.activeEditor = null;
+    this.rateLimitTimer = null;
+    this.isRateLimited = false;
+    this.statusBarItem = null;
+  }
+  async onload() {
+    await this.loadSettings();
+    this.grammarService = new GrammarService(
+      () => this.provider,
+      () => this.settings,
+      () => this.getCurrentApiKey(),
+      () => this.handleRateLimit()
+    );
+    this.realTimeChecker = new RealTimeGrammarChecker(
+      () => this.provider,
+      () => this.settings,
+      () => this.getCurrentApiKey(),
+      () => this.handleRateLimit(),
+      () => this.isRateLimited
+    );
+    this.autocompleteService = new AutocompleteService(
+      () => this.provider,
+      () => this.settings,
+      () => this.getCurrentApiKey(),
+      () => this.handleRateLimit(),
+      () => this.isRateLimited,
+      (text) => this.updateStatusBar(text)
+    );
+    this.setupRealTimeChecking();
+    this.setupAutocomplete();
+    this.setupContextMenu();
+    this.setupCommands();
+    this.addSettingTab(new AISettingsTab(
+      this.app,
+      { containerEl: this.app.workspace.containerEl },
+      {
+        getSettings: () => this.settings,
+        saveSettings: () => this.saveSettings(),
+        getProvider: () => this.provider,
+        getCurrentApiKey: () => this.getCurrentApiKey(),
+        setCurrentApiKey: (key) => this.setCurrentApiKey(key),
+        testApiConnection: () => this.testApiConnection(),
+        straicoModels: this.straicoModels,
+        openaiModels: this.openaiModels,
+        clearModelCache: () => this.clearModelCache()
+      }
+    ));
+    this.statusBarItem = this.addStatusBarItem();
+    this.statusBarItem.setText("");
+  }
+  onunload() {
+    var _a, _b;
+    (_a = this.realTimeChecker) == null ? void 0 : _a.destroy();
+    (_b = this.autocompleteService) == null ? void 0 : _b.destroy();
+    if (this.rateLimitTimer) {
+      clearTimeout(this.rateLimitTimer);
+    }
+  }
+  async loadSettings() {
+    const loadedData = await this.loadData();
+    this.settings = migrateSettings(loadedData);
+    this.initializeProvider();
+  }
+  async saveSettings() {
+    await this.saveData(this.settings);
+    this.initializeProvider();
+  }
+  initializeProvider() {
+    this.provider = ProviderFactory.createProvider(this.settings.provider);
+    if (this.provider) {
+      this.provider.setConfiguration(
+        this.getCurrentApiKey(),
+        this.settings.model,
+        this.settings.baseUrl
+      );
+    }
+  }
+  getCurrentApiKey() {
+    return this.settings.apiKeys[this.settings.provider] || "";
+  }
+  setCurrentApiKey(apiKey) {
+    this.settings.apiKeys[this.settings.provider] = apiKey;
+  }
+  clearModelCache() {
+    this.straicoModels = [];
+    this.openaiModels = [];
+  }
+  setupRealTimeChecking() {
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", (leaf) => {
+        if ((leaf == null ? void 0 : leaf.view) instanceof import_obsidian6.MarkdownView) {
+          this.activeEditor = leaf.view.editor;
+          this.realTimeChecker.clearSuggestionMarkers();
+        } else {
+          this.activeEditor = null;
+          this.realTimeChecker.clearSuggestionMarkers();
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("editor-change", (editor, view) => {
+        if (this.settings.realTimeEnabled && this.activeEditor === editor) {
+          this.realTimeChecker.scheduleCheck(editor, () => {
+          });
+        }
+      })
+    );
+  }
+  setupAutocomplete() {
+    this.registerEvent(
+      this.app.workspace.on("editor-change", (editor, view) => {
+        if (this.settings.autocompleteEnabled && this.activeEditor === editor) {
+          this.autocompleteService.scheduleAutocomplete(editor);
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.workspace.on("editor-change", (editor, view) => {
+        if (this.activeEditor === editor) {
+          const cursor = editor.getCursor();
+          const newPos = editor.posToOffset(cursor);
+          this.autocompleteService.updateCursorPosition(newPos);
+        }
+      })
+    );
+    this.registerDomEvent(document, "keydown", (evt) => {
+      this.autocompleteService.handleKeyDown(evt, this.activeEditor);
+    });
+  }
+  setupContextMenu() {
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        menu.addItem((item) => {
+          item.setTitle("Correct Grammar (Selected)").setIcon("spell-check").onClick(async () => {
+            await this.grammarService.correctSelectedText(editor);
+          });
+        });
+        menu.addItem((item) => {
+          item.setTitle("Correct Grammar (Document)").setIcon("file-text").onClick(async () => {
+            await this.grammarService.correctEntireDocument(editor);
+          });
+        });
+        menu.addItem((item) => {
+          item.setTitle("Improve Writing (Selected)").setIcon("pencil").onClick(async () => {
+            await this.grammarService.improveWriting(editor);
+          });
+        });
+      })
+    );
+  }
+  setupCommands() {
+    this.addCommand({
+      id: "correct-selected-grammar",
+      name: "Correct Grammar (Selected Text)",
+      editorCallback: (editor, view) => {
+        this.grammarService.correctSelectedText(editor);
+      }
+    });
+    this.addCommand({
+      id: "correct-document-grammar",
+      name: "Correct Grammar (Entire Document)",
+      editorCallback: (editor, view) => {
+        this.grammarService.correctEntireDocument(editor);
+      }
+    });
+    this.addCommand({
+      id: "improve-writing",
+      name: "Improve Writing (Selected Text)",
+      editorCallback: (editor, view) => {
+        this.grammarService.improveWriting(editor);
+      }
+    });
+    this.addCommand({
+      id: "trigger-autocomplete",
+      name: "Trigger AI Autocomplete",
+      editorCallback: (editor, view) => {
+        this.autocompleteService.triggerManually(editor);
+      }
+    });
+    this.addCommand({
+      id: "accept-autocomplete",
+      name: "Accept Autocomplete Suggestion",
+      editorCallback: (editor, view) => {
+        if (this.autocompleteService.hasSuggestion()) {
+          this.autocompleteService.handleKeyDown({
+            key: "ArrowRight",
+            preventDefault: () => {
+            },
+            stopPropagation: () => {
+            },
+            ctrlKey: false,
+            metaKey: false,
+            altKey: false
+          }, editor);
+        } else {
+          new import_obsidian6.Notice("No autocomplete suggestion available");
+        }
+      }
+    });
+    this.addCommand({
+      id: "debug-autocomplete",
+      name: "Debug: Test Autocomplete",
+      editorCallback: async (editor, view) => {
+        new import_obsidian6.Notice("Testing autocomplete...");
+        console.log("=== AUTOCOMPLETE DEBUG ===");
+        console.log("API Key set:", !!this.getCurrentApiKey());
+        console.log("Autocomplete enabled:", this.settings.autocompleteEnabled);
+        console.log("Rate limited:", this.isRateLimited);
+        await this.autocompleteService.triggerManually(editor);
+      }
+    });
+  }
+  handleRateLimit() {
+    this.isRateLimited = true;
+    const backoffMs = this.settings.rateLimitBackoff;
+    const minutes = Math.ceil(backoffMs / 6e4);
+    new import_obsidian6.Notice(`Rate limit reached. Pausing for ${minutes} minute(s) to avoid further limits.`);
+    if (this.rateLimitTimer) {
+      clearTimeout(this.rateLimitTimer);
+    }
+    this.rateLimitTimer = setTimeout(() => {
+      this.isRateLimited = false;
+      console.log("Rate limit cooldown ended, resuming grammar checks");
+    }, backoffMs);
+  }
+  async testApiConnection() {
+    if (!this.getCurrentApiKey()) {
+      new import_obsidian6.Notice("Please set your API key first");
+      return false;
+    }
+    if (!this.provider) {
+      new import_obsidian6.Notice("No AI provider configured");
+      return false;
+    }
+    try {
+      console.log("Testing API connection with provider:", this.settings.provider);
+      const success = await this.provider.testConnection(this.getCurrentApiKey(), this.settings.model);
+      if (success) {
+        new import_obsidian6.Notice("API connection successful!");
+        return true;
+      } else {
+        new import_obsidian6.Notice("API connection failed. Check your settings.");
+        return false;
+      }
+    } catch (error) {
+      console.error("Connection test failed:", error);
+      if (error instanceof Error) {
+        if (error.message.includes("fetch")) {
+          new import_obsidian6.Notice("Network error: Check your internet connection and API URL");
+        } else if (error.message.includes("429")) {
+          new import_obsidian6.Notice("Rate limit reached: Try again later or upgrade your plan");
+          this.handleRateLimit();
+        } else {
+          new import_obsidian6.Notice("Connection failed: " + error.message);
+        }
+      }
+      return false;
+    }
+  }
+  updateStatusBar(text) {
+    if (this.statusBarItem) {
+      this.statusBarItem.setText(text);
+    }
   }
 };

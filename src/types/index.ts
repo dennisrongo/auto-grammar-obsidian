@@ -28,3 +28,13 @@ export interface AISettings {
 	autocompleteDebounceMs: number;
 	autocompleteMaxTokens: number;
 }
+
+export interface ModelInfo {
+	id: string;
+	name: string;
+}
+
+export interface ProviderInfo {
+	name: string;
+	displayName: string;
+}
