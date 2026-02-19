@@ -1,7 +1,7 @@
 import { Editor, Notice } from 'obsidian';
 import type { AIProvider } from '../../providers';
 import type { AISettings } from '../../types';
-import { cleanAIResponse, preserveCapitalization, extractWhitespace, isAtStartOfSentence } from '../../utils';
+import { cleanAIResponse, preserveCapitalization, extractWhitespace, isAtStartOfSentence, getDateContext } from '../../utils';
 
 export class GrammarService {
 	constructor(
@@ -11,7 +11,7 @@ export class GrammarService {
 		private handleRateLimit: () => void
 	) {}
 	
-	async correctSelectedText(editor: Editor): Promise<void> {
+	async correctSelectedText(editor: Editor, noteTitle?: string): Promise<void> {
 		const selectedText = editor.getSelection();
 		if (!selectedText) {
 			new Notice('Please select some text to correct');
@@ -29,13 +29,14 @@ export class GrammarService {
 		
 		const startsWithLowercase = /^[a-z]/.test(trimmedText);
 		
-		const contextInfo = `Context: This text is ${isStartOfSentence ? 'at the START of a sentence' : 'in the MIDDLE of a sentence'}. ` +
+		const titleContext = noteTitle ? `Note title: "${noteTitle}". ` : '';
+		const contextInfo = `${getDateContext()}. ${titleContext}This text is ${isStartOfSentence ? 'at the START of a sentence' : 'in the MIDDLE of a sentence'}. ` +
 			`The original text ${/^[A-Z]/.test(trimmedText) ? 'starts with an uppercase letter' : startsWithLowercase ? 'starts with a lowercase letter' : 'does not start with a letter'}.`;
 		
 		const corrected = await this.callAI(
 			trimmedText, 
 			'Correct only the grammar and spelling errors in the following text.\n\n' +
-			`${contextInfo}\n\n` +
+			`Context: ${contextInfo}\n\n` +
 			'IMPORTANT RULES:\n' +
 			'1. Return ONLY the corrected text with no explanations or commentary\n' +
 			'2. Do NOT add any formatting, markdown, or code blocks\n' +
@@ -58,17 +59,19 @@ export class GrammarService {
 		}
 	}
 	
-	async correctEntireDocument(editor: Editor): Promise<void> {
+	async correctEntireDocument(editor: Editor, noteTitle?: string): Promise<void> {
 		const fullText = editor.getValue();
 		if (!fullText.trim()) {
 			new Notice('Document is empty');
 			return;
 		}
 
+		const dateContext = getDateContext();
+		const titleContext = noteTitle ? ` Note title: "${noteTitle}".` : '';
 		new Notice('Correcting document grammar...');
 		const corrected = await this.callAI(
 			fullText, 
-			'Correct only the grammar and spelling errors in the following markdown document. ' +
+			`${dateContext}.${titleContext} Correct only the grammar and spelling errors in the following markdown document. ` +
 			'IMPORTANT RULES:\n' +
 			'1. Return ONLY the corrected document with no explanations or commentary\n' +
 			'2. Do NOT add any extra formatting or code blocks\n' +
@@ -89,7 +92,7 @@ export class GrammarService {
 		}
 	}
 	
-	async improveWriting(editor: Editor): Promise<void> {
+	async improveWriting(editor: Editor, noteTitle?: string): Promise<void> {
 		const selectedText = editor.getSelection();
 		if (!selectedText) {
 			new Notice('Please select some text to improve');
@@ -107,7 +110,9 @@ export class GrammarService {
 		
 		const startsWithLowercase = /^[a-z]/.test(trimmedText);
 		
-		const contextInfo = `Context: This text is ${isStartOfSentence ? 'at the START of a sentence' : 'in the MIDDLE of a sentence'}.`;
+		const titleContext = noteTitle ? `Note title: "${noteTitle}". ` : '';
+		const dateContext = getDateContext();
+		const contextInfo = `Context: ${dateContext}. ${titleContext}This text is ${isStartOfSentence ? 'at the START of a sentence' : 'in the MIDDLE of a sentence'}.`;
 		
 		const improved = await this.callAI(
 			trimmedText,

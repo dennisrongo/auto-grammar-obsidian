@@ -85,10 +85,56 @@ function isAtStartOfSentence(textBefore) {
   return isStartOfLine || isAfterSentenceEnd || isAfterNewline;
 }
 function shouldTriggerAutocomplete(contextBefore, minLength = 10) {
+  const trimmedContext = contextBefore.trim();
+  if (trimmedContext.length < minLength) {
+    return false;
+  }
   const lastChar = contextBefore.slice(-1);
-  const validTrigger = !lastChar || /[\s\n.,!?;:]/.test(lastChar);
-  const enoughContext = contextBefore.trim().length >= minLength;
-  return validTrigger && enoughContext;
+  if (!lastChar) {
+    return true;
+  }
+  if (/[\s\n]$/.test(contextBefore)) {
+    const textBeforeSpace = contextBefore.trimEnd();
+    const lastNonSpaceChar = textBeforeSpace.slice(-1);
+    if (/[.!?]$/.test(textBeforeSpace)) {
+      return true;
+    }
+    if (/[,;:]$/.test(textBeforeSpace)) {
+      return true;
+    }
+    if (/[a-zA-Z0-9'"')\]]$/.test(textBeforeSpace)) {
+      return true;
+    }
+    return false;
+  }
+  return false;
+}
+function isAtSentenceStart(contextBefore) {
+  const trimmed = contextBefore.trimEnd();
+  if (trimmed.length === 0) {
+    return true;
+  }
+  if (/[.!?]\s*$/.test(trimmed)) {
+    return true;
+  }
+  if (/\n\s*$/.test(contextBefore)) {
+    return true;
+  }
+  return false;
+}
+function adjustSuggestionCasing(suggestion, isStartOfSentence) {
+  var _a;
+  if (!suggestion || suggestion.length === 0) {
+    return suggestion;
+  }
+  let cleaned = suggestion.trimStart();
+  if (!isStartOfSentence) {
+    cleaned = cleaned.charAt(0).toLowerCase() + cleaned.slice(1);
+  } else {
+    cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+  }
+  const originalLeadingWhitespace = ((_a = suggestion.match(/^(\s*)/)) == null ? void 0 : _a[1]) || "";
+  return originalLeadingWhitespace + cleaned;
 }
 function preserveCapitalization(originalText, correctedText, isStartOfSentence) {
   if (correctedText.length === 0)
@@ -110,6 +156,18 @@ function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
   return div.innerHTML;
+}
+function getDateContext() {
+  const now = new Date();
+  const options = {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric"
+  };
+  const dateStr = now.toLocaleDateString("en-US", options);
+  const timeStr = now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+  return `Current date and time: ${dateStr}, ${timeStr}`;
 }
 
 // src/providers/BaseProvider.ts
@@ -168,8 +226,10 @@ var BaseProvider = class {
   async callAPI(text, instruction, temperature, maxTokens = 2e3) {
     return this.makeChatRequest(instruction, text, temperature, maxTokens);
   }
-  async getGrammarSuggestions(text, temperature) {
-    const systemPrompt = 'You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use ```json or ```. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]';
+  async getGrammarSuggestions(text, temperature, noteTitle) {
+    const dateContext = getDateContext();
+    const titleContext = noteTitle ? ` Note title: "${noteTitle}".` : "";
+    const systemPrompt = `${dateContext}.${titleContext} You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use code blocks. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]`;
     const content = await this.makeChatRequest(
       systemPrompt,
       `Please analyze this text for grammar and spelling issues: "${text}"`,
@@ -178,11 +238,13 @@ var BaseProvider = class {
     );
     return parseJsonArray(content);
   }
-  async getAutocompleteSuggestion(contextBefore, temperature, maxTokens) {
-    const systemPrompt = "You are a professional writing assistant. Continue the text in a formal, professional tone. Use clear and concise language. Avoid casual phrases, slang, or overly conversational style. Write as if for a business document or professional publication. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum).";
+  async getAutocompleteSuggestion(contextBefore, temperature, maxTokens, noteTitle) {
+    const dateContext = getDateContext();
+    const titleContext = noteTitle ? ` Note title: "${noteTitle}".` : "";
+    const systemPrompt = `${dateContext}.${titleContext} You are a professional writing assistant. Complete ONLY the current sentence being typed. Do NOT add new sentences. Continue the thought naturally and professionally. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. ALWAYS end with the appropriate punctuation mark (period, question mark, or exclamation point).`;
     let suggestion = await this.makeChatRequest(
       systemPrompt,
-      `Continue this text professionally: "${contextBefore}"`,
+      `Complete this sentence: "${contextBefore}"`,
       temperature,
       maxTokens
     );
@@ -339,16 +401,17 @@ var _StraicoProvider = class extends BaseProvider {
     return { default: 1500, max: 4e3 };
   }
   extractStraicoContent(data) {
-    var _a, _b, _c, _d, _e, _f, _g, _h;
+    var _a, _b, _c, _d, _e, _f, _g;
     if ((_a = data.data) == null ? void 0 : _a.completions) {
       const completions = data.data.completions;
       const modelKeys = Object.keys(completions);
       if (modelKeys.length > 0) {
         const firstModelCompletion = completions[modelKeys[0]];
-        return ((_e = (_d = (_c = (_b = firstModelCompletion == null ? void 0 : firstModelCompletion.completion) == null ? void 0 : _b.choices) == null ? void 0 : _c[0]) == null ? void 0 : _d.message) == null ? void 0 : _e.content) || "";
+        const message = (_d = (_c = (_b = firstModelCompletion == null ? void 0 : firstModelCompletion.completion) == null ? void 0 : _b.choices) == null ? void 0 : _c[0]) == null ? void 0 : _d.message;
+        return (message == null ? void 0 : message.content) || (message == null ? void 0 : message.reasoning) || "";
       }
     }
-    return ((_h = (_g = (_f = data.choices) == null ? void 0 : _f[0]) == null ? void 0 : _g.message) == null ? void 0 : _h.content) || "";
+    return ((_g = (_f = (_e = data.choices) == null ? void 0 : _e[0]) == null ? void 0 : _f.message) == null ? void 0 : _g.content) || "";
   }
   async makeChatRequest(systemPrompt, userMessage, temperature, maxTokens) {
     const model = this.getModel();
@@ -366,7 +429,6 @@ ${userMessage}`,
       temperature,
       max_tokens: maxTokens
     };
-    console.log("Straico API Request:", JSON.stringify(requestBody, null, 2));
     const response = await fetch(this.getBaseUrl(), {
       method: "POST",
       headers: {
@@ -381,7 +443,6 @@ ${userMessage}`,
       throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
     }
     const data = await response.json();
-    console.log("Straico API Response:", data);
     return this.extractStraicoContent(data) || "";
   }
   async testConnection(apiKey, model) {
@@ -478,7 +539,7 @@ var GrammarService = class {
     this.getCurrentApiKey = getCurrentApiKey;
     this.handleRateLimit = handleRateLimit;
   }
-  async correctSelectedText(editor) {
+  async correctSelectedText(editor, noteTitle) {
     const selectedText = editor.getSelection();
     if (!selectedText) {
       new import_obsidian.Notice("Please select some text to correct");
@@ -491,12 +552,13 @@ var GrammarService = class {
     const textBeforeSelection = editor.getRange(lineStart, selectionStart);
     const isStartOfSentence = isAtStartOfSentence(textBeforeSelection);
     const startsWithLowercase = /^[a-z]/.test(trimmedText);
-    const contextInfo = `Context: This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}. The original text ${/^[A-Z]/.test(trimmedText) ? "starts with an uppercase letter" : startsWithLowercase ? "starts with a lowercase letter" : "does not start with a letter"}.`;
+    const titleContext = noteTitle ? `Note title: "${noteTitle}". ` : "";
+    const contextInfo = `${getDateContext()}. ${titleContext}This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}. The original text ${/^[A-Z]/.test(trimmedText) ? "starts with an uppercase letter" : startsWithLowercase ? "starts with a lowercase letter" : "does not start with a letter"}.`;
     const corrected = await this.callAI(
       trimmedText,
       `Correct only the grammar and spelling errors in the following text.
 
-${contextInfo}
+Context: ${contextInfo}
 
 IMPORTANT RULES:
 1. Return ONLY the corrected text with no explanations or commentary
@@ -517,16 +579,24 @@ IMPORTANT RULES:
       new import_obsidian.Notice("Grammar corrected");
     }
   }
-  async correctEntireDocument(editor) {
+  async correctEntireDocument(editor, noteTitle) {
     const fullText = editor.getValue();
     if (!fullText.trim()) {
       new import_obsidian.Notice("Document is empty");
       return;
     }
+    const dateContext = getDateContext();
+    const titleContext = noteTitle ? ` Note title: "${noteTitle}".` : "";
     new import_obsidian.Notice("Correcting document grammar...");
     const corrected = await this.callAI(
       fullText,
-      "Correct only the grammar and spelling errors in the following markdown document. IMPORTANT RULES:\n1. Return ONLY the corrected document with no explanations or commentary\n2. Do NOT add any extra formatting or code blocks\n3. Preserve ALL markdown syntax exactly (headers, links, bold, italic, lists, code blocks, etc.)\n4. Do NOT change the document structure or add/remove sections\n5. Preserve the original line breaks and paragraph structure\n6. If there are no errors, return the text exactly as is"
+      `${dateContext}.${titleContext} Correct only the grammar and spelling errors in the following markdown document. IMPORTANT RULES:
+1. Return ONLY the corrected document with no explanations or commentary
+2. Do NOT add any extra formatting or code blocks
+3. Preserve ALL markdown syntax exactly (headers, links, bold, italic, lists, code blocks, etc.)
+4. Do NOT change the document structure or add/remove sections
+5. Preserve the original line breaks and paragraph structure
+6. If there are no errors, return the text exactly as is`
     );
     if (corrected) {
       let cleanedResult = cleanAIResponse(corrected);
@@ -537,7 +607,7 @@ IMPORTANT RULES:
       }
     }
   }
-  async improveWriting(editor) {
+  async improveWriting(editor, noteTitle) {
     const selectedText = editor.getSelection();
     if (!selectedText) {
       new import_obsidian.Notice("Please select some text to improve");
@@ -550,7 +620,9 @@ IMPORTANT RULES:
     const textBeforeSelection = editor.getRange(lineStart, selectionStart);
     const isStartOfSentence = isAtStartOfSentence(textBeforeSelection);
     const startsWithLowercase = /^[a-z]/.test(trimmedText);
-    const contextInfo = `Context: This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}.`;
+    const titleContext = noteTitle ? `Note title: "${noteTitle}". ` : "";
+    const dateContext = getDateContext();
+    const contextInfo = `Context: ${dateContext}. ${titleContext}This text is ${isStartOfSentence ? "at the START of a sentence" : "in the MIDDLE of a sentence"}.`;
     const improved = await this.callAI(
       trimmedText,
       `Improve the clarity, style, and flow of the following text.
@@ -621,12 +693,12 @@ var RealTimeGrammarChecker = class {
     this.currentSuggestions = [];
     this.suggestionMarkers = [];
   }
-  scheduleCheck(editor, callback) {
+  scheduleCheck(editor, noteTitle, callback) {
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
     }
     this.debounceTimer = setTimeout(async () => {
-      await this.checkGrammar(editor);
+      await this.checkGrammar(editor, noteTitle);
       callback();
     }, this.getSettings().debounceMs);
   }
@@ -636,7 +708,7 @@ var RealTimeGrammarChecker = class {
       this.debounceTimer = null;
     }
   }
-  async checkGrammar(editor) {
+  async checkGrammar(editor, noteTitle) {
     const text = editor.getValue();
     if (!text.trim()) {
       this.clearSuggestionMarkers();
@@ -653,7 +725,7 @@ var RealTimeGrammarChecker = class {
     }
     try {
       console.log("Starting real-time grammar check...");
-      const suggestions = await this.getGrammarSuggestions(text);
+      const suggestions = await this.getGrammarSuggestions(text, noteTitle);
       console.log("Suggestions received:", suggestions);
       this.displaySuggestions(editor, suggestions);
     } catch (error) {
@@ -674,7 +746,7 @@ var RealTimeGrammarChecker = class {
       }
     }
   }
-  async getGrammarSuggestions(text) {
+  async getGrammarSuggestions(text, noteTitle) {
     if (this.isRateLimited()) {
       throw new Error("Rate limit in effect");
     }
@@ -684,7 +756,7 @@ var RealTimeGrammarChecker = class {
     }
     console.log("Getting grammar suggestions for text length:", text.length);
     try {
-      const suggestions = await provider.getGrammarSuggestions(text, this.getSettings().temperature);
+      const suggestions = await provider.getGrammarSuggestions(text, this.getSettings().temperature, noteTitle);
       return suggestions;
     } catch (error) {
       if (error.message.includes("429") || error.message.includes("rate limit")) {
@@ -822,7 +894,7 @@ var AutocompleteService = class {
     this.isAccepting = false;
     this.lastCursorPosition = 0;
   }
-  scheduleAutocomplete(editor) {
+  scheduleAutocomplete(editor, noteTitle) {
     if (this.isAccepting) {
       console.log("Autocomplete skipped: currently accepting a suggestion");
       return;
@@ -833,7 +905,7 @@ var AutocompleteService = class {
     this.clearAutocomplete();
     this.updateStatusBar("\u23F3 Getting AI suggestion...");
     this.timer = setTimeout(async () => {
-      await this.getSuggestion(editor);
+      await this.getSuggestion(editor, noteTitle);
       this.updateStatusBar("");
     }, this.getSettings().autocompleteDebounceMs);
   }
@@ -846,17 +918,17 @@ var AutocompleteService = class {
   updateCursorPosition(position) {
     this.lastCursorPosition = position;
   }
-  async triggerManually(editor) {
+  async triggerManually(editor, noteTitle) {
     if (!this.getSettings().autocompleteEnabled) {
       new import_obsidian3.Notice("Autocomplete is disabled. Enable it in settings.");
       return;
     }
     new import_obsidian3.Notice("Getting suggestion...");
     this.updateStatusBar("\u23F3 Getting AI suggestion...");
-    await this.getSuggestion(editor);
+    await this.getSuggestion(editor, noteTitle);
     this.updateStatusBar("");
   }
-  async getSuggestion(editor) {
+  async getSuggestion(editor, noteTitle) {
     if (this.isRateLimited() || !this.getCurrentApiKey()) {
       console.log("Autocomplete skipped: rate limited or no API key");
       return;
@@ -874,10 +946,13 @@ var AutocompleteService = class {
         return;
       }
       console.log("Calling AI for autocomplete...");
-      const suggestion = await this.callAI(contextBefore);
+      const suggestion = await this.callAI(contextBefore, noteTitle);
       console.log("Received suggestion:", suggestion);
       if (suggestion && suggestion.trim()) {
-        this.display(editor, suggestion, cursorOffset);
+        const isStartOfSentence = isAtSentenceStart(contextBefore);
+        const adjustedSuggestion = adjustSuggestionCasing(suggestion, isStartOfSentence);
+        console.log("Casing adjusted:", { isStartOfSentence, adjustedSuggestion });
+        this.display(editor, adjustedSuggestion, cursorOffset);
       } else {
         console.log("No suggestion received");
       }
@@ -885,7 +960,7 @@ var AutocompleteService = class {
       console.error("Autocomplete error:", error);
     }
   }
-  async callAI(contextBefore) {
+  async callAI(contextBefore, noteTitle) {
     const provider = this.getProvider();
     if (!provider) {
       throw new Error("No AI provider configured");
@@ -894,7 +969,8 @@ var AutocompleteService = class {
       const suggestion = await provider.getAutocompleteSuggestion(
         contextBefore,
         this.getSettings().temperature,
-        this.getSettings().autocompleteMaxTokens
+        this.getSettings().autocompleteMaxTokens,
+        noteTitle
       );
       return suggestion;
     } catch (error) {
@@ -1032,7 +1108,7 @@ var DEFAULT_SETTINGS = {
   temperature: 0.1,
   autocompleteEnabled: true,
   autocompleteDebounceMs: 500,
-  autocompleteMaxTokens: 50
+  autocompleteMaxTokens: 30
 };
 function migrateSettings(loadedData) {
   if (loadedData && loadedData.apiKey && !loadedData.apiKeys) {
@@ -1104,9 +1180,8 @@ var CustomModelModal = class extends import_obsidian4.Modal {
 
 // src/settings/SettingsTab.ts
 var AISettingsTab = class extends import_obsidian5.PluginSettingTab {
-  constructor(app, containerElement, deps) {
-    super(app, containerElement);
-    this.containerElement = containerElement;
+  constructor(app, plugin, deps) {
+    super(app, plugin);
     this.deps = deps;
   }
   display() {
@@ -1304,6 +1379,7 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
     this.straicoModels = [];
     this.openaiModels = [];
     this.activeEditor = null;
+    this.activeNoteTitle = null;
     this.rateLimitTimer = null;
     this.isRateLimited = false;
     this.statusBarItem = null;
@@ -1337,7 +1413,7 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
     this.setupCommands();
     this.addSettingTab(new AISettingsTab(
       this.app,
-      { containerEl: this.app.workspace.containerEl },
+      this,
       {
         getSettings: () => this.settings,
         saveSettings: () => this.saveSettings(),
@@ -1393,19 +1469,24 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
   setupRealTimeChecking() {
     this.registerEvent(
       this.app.workspace.on("active-leaf-change", (leaf) => {
+        var _a, _b;
         if ((leaf == null ? void 0 : leaf.view) instanceof import_obsidian6.MarkdownView) {
           this.activeEditor = leaf.view.editor;
+          this.activeNoteTitle = (_b = (_a = leaf.view.file) == null ? void 0 : _a.basename) != null ? _b : null;
           this.realTimeChecker.clearSuggestionMarkers();
         } else {
           this.activeEditor = null;
+          this.activeNoteTitle = null;
           this.realTimeChecker.clearSuggestionMarkers();
         }
       })
     );
     this.registerEvent(
       this.app.workspace.on("editor-change", (editor, view) => {
+        var _a, _b, _c;
         if (this.settings.realTimeEnabled && this.activeEditor === editor) {
-          this.realTimeChecker.scheduleCheck(editor, () => {
+          this.activeNoteTitle = (_b = (_a = view.file) == null ? void 0 : _a.basename) != null ? _b : null;
+          this.realTimeChecker.scheduleCheck(editor, (_c = this.activeNoteTitle) != null ? _c : void 0, () => {
           });
         }
       })
@@ -1414,8 +1495,10 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
   setupAutocomplete() {
     this.registerEvent(
       this.app.workspace.on("editor-change", (editor, view) => {
+        var _a;
         if (this.settings.autocompleteEnabled && this.activeEditor === editor) {
-          this.autocompleteService.scheduleAutocomplete(editor);
+          const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
+          this.autocompleteService.scheduleAutocomplete(editor, noteTitle);
         }
       })
     );
@@ -1435,19 +1518,21 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
   setupContextMenu() {
     this.registerEvent(
       this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        var _a;
+        const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
         menu.addItem((item) => {
           item.setTitle("Correct Grammar (Selected)").setIcon("spell-check").onClick(async () => {
-            await this.grammarService.correctSelectedText(editor);
+            await this.grammarService.correctSelectedText(editor, noteTitle);
           });
         });
         menu.addItem((item) => {
           item.setTitle("Correct Grammar (Document)").setIcon("file-text").onClick(async () => {
-            await this.grammarService.correctEntireDocument(editor);
+            await this.grammarService.correctEntireDocument(editor, noteTitle);
           });
         });
         menu.addItem((item) => {
           item.setTitle("Improve Writing (Selected)").setIcon("pencil").onClick(async () => {
-            await this.grammarService.improveWriting(editor);
+            await this.grammarService.improveWriting(editor, noteTitle);
           });
         });
       })
@@ -1458,28 +1543,36 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
       id: "correct-selected-grammar",
       name: "Correct Grammar (Selected Text)",
       editorCallback: (editor, view) => {
-        this.grammarService.correctSelectedText(editor);
+        var _a;
+        const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
+        this.grammarService.correctSelectedText(editor, noteTitle);
       }
     });
     this.addCommand({
       id: "correct-document-grammar",
       name: "Correct Grammar (Entire Document)",
       editorCallback: (editor, view) => {
-        this.grammarService.correctEntireDocument(editor);
+        var _a;
+        const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
+        this.grammarService.correctEntireDocument(editor, noteTitle);
       }
     });
     this.addCommand({
       id: "improve-writing",
       name: "Improve Writing (Selected Text)",
       editorCallback: (editor, view) => {
-        this.grammarService.improveWriting(editor);
+        var _a;
+        const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
+        this.grammarService.improveWriting(editor, noteTitle);
       }
     });
     this.addCommand({
       id: "trigger-autocomplete",
       name: "Trigger AI Autocomplete",
       editorCallback: (editor, view) => {
-        this.autocompleteService.triggerManually(editor);
+        var _a;
+        const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
+        this.autocompleteService.triggerManually(editor, noteTitle);
       }
     });
     this.addCommand({
@@ -1506,12 +1599,14 @@ var AIGrammarAssistant = class extends import_obsidian6.Plugin {
       id: "debug-autocomplete",
       name: "Debug: Test Autocomplete",
       editorCallback: async (editor, view) => {
+        var _a;
+        const noteTitle = (_a = view.file) == null ? void 0 : _a.basename;
         new import_obsidian6.Notice("Testing autocomplete...");
         console.log("=== AUTOCOMPLETE DEBUG ===");
         console.log("API Key set:", !!this.getCurrentApiKey());
         console.log("Autocomplete enabled:", this.settings.autocompleteEnabled);
         console.log("Rate limited:", this.isRateLimited);
-        await this.autocompleteService.triggerManually(editor);
+        await this.autocompleteService.triggerManually(editor, noteTitle);
       }
     });
   }

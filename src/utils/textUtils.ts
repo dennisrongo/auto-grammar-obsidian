@@ -64,10 +64,72 @@ export function isAtStartOfSentence(textBefore: string): boolean {
 }
 
 export function shouldTriggerAutocomplete(contextBefore: string, minLength: number = 10): boolean {
+	const trimmedContext = contextBefore.trim();
+	if (trimmedContext.length < minLength) {
+		return false;
+	}
+	
 	const lastChar = contextBefore.slice(-1);
-	const validTrigger = !lastChar || /[\s\n.,!?;:]/.test(lastChar);
-	const enoughContext = contextBefore.trim().length >= minLength;
-	return validTrigger && enoughContext;
+	
+	if (!lastChar) {
+		return true;
+	}
+	
+	if (/[\s\n]$/.test(contextBefore)) {
+		const textBeforeSpace = contextBefore.trimEnd();
+		const lastNonSpaceChar = textBeforeSpace.slice(-1);
+		
+		if (/[.!?]$/.test(textBeforeSpace)) {
+			return true;
+		}
+		
+		if (/[,;:]$/.test(textBeforeSpace)) {
+			return true;
+		}
+		
+		if (/[a-zA-Z0-9'"')\]]$/.test(textBeforeSpace)) {
+			return true;
+		}
+		
+		return false;
+	}
+	
+	return false;
+}
+
+export function isAtSentenceStart(contextBefore: string): boolean {
+	const trimmed = contextBefore.trimEnd();
+	
+	if (trimmed.length === 0) {
+		return true;
+	}
+	
+	if (/[.!?]\s*$/.test(trimmed)) {
+		return true;
+	}
+	
+	if (/\n\s*$/.test(contextBefore)) {
+		return true;
+	}
+	
+	return false;
+}
+
+export function adjustSuggestionCasing(suggestion: string, isStartOfSentence: boolean): string {
+	if (!suggestion || suggestion.length === 0) {
+		return suggestion;
+	}
+	
+	let cleaned = suggestion.trimStart();
+	
+	if (!isStartOfSentence) {
+		cleaned = cleaned.charAt(0).toLowerCase() + cleaned.slice(1);
+	} else {
+		cleaned = cleaned.charAt(0).toUpperCase() + cleaned.slice(1);
+	}
+	
+	const originalLeadingWhitespace = suggestion.match(/^(\s*)/)?.[1] || '';
+	return originalLeadingWhitespace + cleaned;
 }
 
 export function preserveCapitalization(originalText: string, correctedText: string, isStartOfSentence: boolean): string {
@@ -93,4 +155,17 @@ export function escapeHtml(text: string): string {
 	const div = document.createElement('div');
 	div.textContent = text;
 	return div.innerHTML;
+}
+
+export function getDateContext(): string {
+	const now = new Date();
+	const options: Intl.DateTimeFormatOptions = {
+		weekday: 'long',
+		year: 'numeric',
+		month: 'long',
+		day: 'numeric'
+	};
+	const dateStr = now.toLocaleDateString('en-US', options);
+	const timeStr = now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+	return `Current date and time: ${dateStr}, ${timeStr}`;
 }

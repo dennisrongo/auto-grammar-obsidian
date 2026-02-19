@@ -17,6 +17,7 @@ export default class AIGrammarAssistant extends Plugin {
 	private autocompleteService!: AutocompleteService;
 	
 	private activeEditor: Editor | null = null;
+	private activeNoteTitle: string | null = null;
 	private rateLimitTimer: NodeJS.Timeout | null = null;
 	private isRateLimited: boolean = false;
 	private statusBarItem: HTMLElement | null = null;
@@ -55,7 +56,7 @@ export default class AIGrammarAssistant extends Plugin {
 		
 		this.addSettingTab(new AISettingsTab(
 			this.app,
-			{ containerEl: this.app.workspace.containerEl } as any,
+			this,
 			{
 				getSettings: () => this.settings,
 				saveSettings: () => this.saveSettings(),
@@ -122,9 +123,11 @@ export default class AIGrammarAssistant extends Plugin {
 			this.app.workspace.on('active-leaf-change', (leaf) => {
 				if (leaf?.view instanceof MarkdownView) {
 					this.activeEditor = leaf.view.editor;
+					this.activeNoteTitle = leaf.view.file?.basename ?? null;
 					this.realTimeChecker.clearSuggestionMarkers();
 				} else {
 					this.activeEditor = null;
+					this.activeNoteTitle = null;
 					this.realTimeChecker.clearSuggestionMarkers();
 				}
 			})
@@ -133,7 +136,8 @@ export default class AIGrammarAssistant extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on('editor-change', (editor, view) => {
 				if (this.settings.realTimeEnabled && this.activeEditor === editor) {
-					this.realTimeChecker.scheduleCheck(editor, () => {});
+					this.activeNoteTitle = view.file?.basename ?? null;
+					this.realTimeChecker.scheduleCheck(editor, this.activeNoteTitle ?? undefined, () => {});
 				}
 			})
 		);
@@ -143,7 +147,8 @@ export default class AIGrammarAssistant extends Plugin {
 		this.registerEvent(
 			this.app.workspace.on('editor-change', (editor, view) => {
 				if (this.settings.autocompleteEnabled && this.activeEditor === editor) {
-					this.autocompleteService.scheduleAutocomplete(editor);
+					const noteTitle = view.file?.basename;
+					this.autocompleteService.scheduleAutocomplete(editor, noteTitle);
 				}
 			})
 		);
@@ -166,11 +171,12 @@ export default class AIGrammarAssistant extends Plugin {
 	private setupContextMenu(): void {
 		this.registerEvent(
 			this.app.workspace.on('editor-menu', (menu, editor, view) => {
+				const noteTitle = view.file?.basename;
 				menu.addItem((item) => {
 					item.setTitle('Correct Grammar (Selected)')
 						.setIcon('spell-check')
 						.onClick(async () => {
-							await this.grammarService.correctSelectedText(editor);
+							await this.grammarService.correctSelectedText(editor, noteTitle);
 						});
 				});
 
@@ -178,7 +184,7 @@ export default class AIGrammarAssistant extends Plugin {
 					item.setTitle('Correct Grammar (Document)')
 						.setIcon('file-text')
 						.onClick(async () => {
-							await this.grammarService.correctEntireDocument(editor);
+							await this.grammarService.correctEntireDocument(editor, noteTitle);
 						});
 				});
 
@@ -186,7 +192,7 @@ export default class AIGrammarAssistant extends Plugin {
 					item.setTitle('Improve Writing (Selected)')
 						.setIcon('pencil')
 						.onClick(async () => {
-							await this.grammarService.improveWriting(editor);
+							await this.grammarService.improveWriting(editor, noteTitle);
 						});
 				});
 			})
@@ -198,7 +204,8 @@ export default class AIGrammarAssistant extends Plugin {
 			id: 'correct-selected-grammar',
 			name: 'Correct Grammar (Selected Text)',
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				this.grammarService.correctSelectedText(editor);
+				const noteTitle = view.file?.basename;
+				this.grammarService.correctSelectedText(editor, noteTitle);
 			}
 		});
 
@@ -206,7 +213,8 @@ export default class AIGrammarAssistant extends Plugin {
 			id: 'correct-document-grammar',
 			name: 'Correct Grammar (Entire Document)',
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				this.grammarService.correctEntireDocument(editor);
+				const noteTitle = view.file?.basename;
+				this.grammarService.correctEntireDocument(editor, noteTitle);
 			}
 		});
 
@@ -214,7 +222,8 @@ export default class AIGrammarAssistant extends Plugin {
 			id: 'improve-writing',
 			name: 'Improve Writing (Selected Text)',
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				this.grammarService.improveWriting(editor);
+				const noteTitle = view.file?.basename;
+				this.grammarService.improveWriting(editor, noteTitle);
 			}
 		});
 
@@ -222,7 +231,8 @@ export default class AIGrammarAssistant extends Plugin {
 			id: 'trigger-autocomplete',
 			name: 'Trigger AI Autocomplete',
 			editorCallback: (editor: Editor, view: MarkdownView) => {
-				this.autocompleteService.triggerManually(editor);
+				const noteTitle = view.file?.basename;
+				this.autocompleteService.triggerManually(editor, noteTitle);
 			}
 		});
 
@@ -249,13 +259,14 @@ export default class AIGrammarAssistant extends Plugin {
 			id: 'debug-autocomplete',
 			name: 'Debug: Test Autocomplete',
 			editorCallback: async (editor: Editor, view: MarkdownView) => {
+				const noteTitle = view.file?.basename;
 				new Notice('Testing autocomplete...');
 				console.log('=== AUTOCOMPLETE DEBUG ===');
 				console.log('API Key set:', !!this.getCurrentApiKey());
 				console.log('Autocomplete enabled:', this.settings.autocompleteEnabled);
 				console.log('Rate limited:', this.isRateLimited);
 				
-				await this.autocompleteService.triggerManually(editor);
+				await this.autocompleteService.triggerManually(editor, noteTitle);
 			}
 		});
 	}

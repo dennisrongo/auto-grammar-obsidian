@@ -4,67 +4,112 @@ An Obsidian plugin that provides AI-powered grammar correction and writing assis
 
 ## Features
 
-- **Right-click context menu** with grammar correction options
-- **Selected text correction** - Fix grammar and spelling in highlighted portions
-- **Entire document correction** - Process complete notes at once
-- **Writing improvement** - Enhance clarity, style, and flow
-- **Configurable AI provider** - Start with GLM-4-32B, supports other providers
-- **Real-time grammar checking** - Visual indicators as you type
-- **AI autocomplete/IntelliSense** - Predictive text suggestions
-- **Command palette integration** - Quick access via hotkeys
+### Grammar & Writing
+- **Selected Text Correction** - Fix grammar and spelling in highlighted portions
+- **Entire Document Correction** - Process complete notes at once
+- **Writing Improvement** - Enhance clarity, style, and flow of selected text
+- **Real-time Grammar Checking** - Visual indicators as you type (optional)
+
+### AI Autocomplete
+- **Intelligent Text Predictions** - Get context-aware suggestions as you write
+- **Ghost Text Display** - See suggestions in a non-intrusive popup
+- **One-key Acceptance** - Press `→` (Arrow Right) at end of line to accept
+
+### Context Awareness
+- **Date/Time Context** - AI knows the current date and time
+- **Note Title Context** - AI understands the topic based on your note's title
+
+### User Interface
+- **Right-click Context Menu** - Quick access to all features
+- **Command Palette Integration** - Assign hotkeys to any action
+- **Customizable Settings** - Configure providers, models, and behavior
+
+## Supported Providers
+
+| Provider | Default Model | Get API Key |
+|----------|---------------|-------------|
+| **Z.ai** (default) | GLM-4-32B-0414-128K | [z.ai/manage-apikey](https://z.ai/manage-apikey/apikey-list) |
+| **OpenAI** | gpt-4o | [platform.openai.com](https://platform.openai.com/api-keys) |
+| **Straico** | openai/gpt-4o-mini | [straico.com](https://straico.com) |
 
 ## Installation
 
-1. Clone this repository into your Obsidian plugins directory
-2. Run `npm install` to install dependencies
-3. Run `npm run build` to build the plugin
-4. Enable the plugin in Obsidian settings
+### From Release
+1. Download the latest release
+2. Extract to `.obsidian/plugins/ai-grammar-assistant/`
+3. Enable in Obsidian settings
+
+### From Source
+```bash
+cd /path/to/your/vault/.obsidian/plugins
+git clone https://github.com/your-repo/ai-grammar-assistant.git
+cd ai-grammar-assistant
+npm install
+npm run build
+```
 
 ## Setup
 
-1. Get an API key from [Zhipu AI](https://z.ai/manage-apikey/apikey-list)
-2. Open plugin settings in Obsidian
-3. Enter your API key
-4. Configure model and base URL if needed (defaults are set for GLM-4-32B)
+1. Open **Settings → AI Grammar Assistant**
+2. Select your preferred **Provider**
+3. Enter your **API Key** for the selected provider
+4. (Optional) Customize model and settings
+5. Click **Test Connection** to verify
 
 ## Usage
 
-### Right-click Menu
-- Right-click anywhere in a note to see the context menu
-- Choose from:
-  - **Correct Grammar (Selected)** - Fixes highlighted text
-  - **Correct Grammar (Document)** - Processes entire note
-  - **Improve Writing** - Enhances selected text quality
+### Context Menu
+Right-click in any note to access:
+- **Correct Grammar (Selected)** - Fix highlighted text
+- **Correct Grammar (Document)** - Process entire note
+- **Improve Writing** - Enhance style and clarity
 
 ### Command Palette
-- Open command palette (Ctrl/Cmd + P)
-- Search for "AI Grammar" commands
-- Execute on selected text or entire document
+Press `Ctrl/Cmd + P` and search for:
+- `AI Grammar: Correct Grammar (Selected Text)`
+- `AI Grammar: Correct Grammar (Entire Document)`
+- `AI Grammar: Improve Writing`
+- `AI Grammar: Trigger AI Autocomplete`
+- `AI Grammar: Accept Autocomplete Suggestion`
+
+### Autocomplete
+1. Start typing in a note
+2. When a suggestion appears, press `→` to accept or `Esc` to dismiss
+3. Suggestions work best after ending a sentence or typing a space
 
 ## Configuration
 
-The plugin supports the following settings:
+### General Settings
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Provider | AI service provider | Z.ai |
+| Model | AI model to use | Provider default |
+| Temperature | Randomness (0-1) | 0.1 |
+| Base URL | API endpoint | Provider default |
 
-- **API Key**: Your AI service authentication key
-- **Model**: AI model to use (default: GLM-4-32B-0414-128K)
-- **Base URL**: API endpoint URL (default: https://api.z.ai/api/paas/v4/chat/completions)
-- **Temperature**: Controls randomness (0.0 = deterministic, 1.0 = creative)
-- **Real-time Grammar Checking**: Enable/disable automatic checking
-- **Autocomplete**: Enable/disable AI-powered text predictions
+### Real-time Grammar
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Enable | Toggle real-time checking | Off |
+| Debounce | Delay before checking (ms) | 2000 |
+
+### Autocomplete
+| Setting | Description | Default |
+|---------|-------------|---------|
+| Enable | Toggle autocomplete | Off |
+| Debounce | Delay before suggesting (ms) | 500 |
+| Max Tokens | Max suggestion length | 50 |
 
 ## Development
 
 ```bash
-# Install dependencies
-npm install
-
-# Development build with hot reload
-npm run dev
-
-# Production build
-npm run build
+npm install          # Install dependencies
+npm run dev          # Development with hot reload
+npm run build        # Production build
+npm test             # Run tests
+npm run test:coverage # Run tests with coverage
 ```
 
 ## License
 
-MIT License
+MIT

@@ -1,6 +1,6 @@
 import { AIProvider } from './types';
 import { GrammarSuggestion, ModelInfo } from '../types';
-import { parseJsonArray, removeDuplicatePrefix } from '../utils';
+import { parseJsonArray, removeDuplicatePrefix, getDateContext } from '../utils';
 
 export abstract class BaseProvider implements AIProvider {
 	abstract name: string;
@@ -78,8 +78,10 @@ export abstract class BaseProvider implements AIProvider {
 		return this.makeChatRequest(instruction, text, temperature, maxTokens);
 	}
 	
-	async getGrammarSuggestions(text: string, temperature: number): Promise<GrammarSuggestion[]> {
-		const systemPrompt = 'You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use ```json or ```. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]';
+	async getGrammarSuggestions(text: string, temperature: number, noteTitle?: string): Promise<GrammarSuggestion[]> {
+		const dateContext = getDateContext();
+		const titleContext = noteTitle ? ` Note title: "${noteTitle}".` : '';
+		const systemPrompt = `${dateContext}.${titleContext} You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return ONLY the JSON array WITHOUT markdown formatting or code blocks. Do NOT use code blocks. Just return the raw JSON array. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]`;
 		
 		const content = await this.makeChatRequest(
 			systemPrompt,
@@ -91,12 +93,14 @@ export abstract class BaseProvider implements AIProvider {
 		return parseJsonArray<GrammarSuggestion>(content);
 	}
 	
-	async getAutocompleteSuggestion(contextBefore: string, temperature: number, maxTokens: number): Promise<string> {
-		const systemPrompt = 'You are a professional writing assistant. Continue the text in a formal, professional tone. Use clear and concise language. Avoid casual phrases, slang, or overly conversational style. Write as if for a business document or professional publication. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum).';
+	async getAutocompleteSuggestion(contextBefore: string, temperature: number, maxTokens: number, noteTitle?: string): Promise<string> {
+		const dateContext = getDateContext();
+		const titleContext = noteTitle ? ` Note title: "${noteTitle}".` : '';
+		const systemPrompt = `${dateContext}.${titleContext} You are a professional writing assistant. Complete ONLY the current sentence being typed. Do NOT add new sentences. Continue the thought naturally and professionally. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. ALWAYS end with the appropriate punctuation mark (period, question mark, or exclamation point).`;
 		
 		let suggestion = await this.makeChatRequest(
 			systemPrompt,
-			`Continue this text professionally: "${contextBefore}"`,
+			`Complete this sentence: "${contextBefore}"`,
 			temperature,
 			maxTokens
 		);

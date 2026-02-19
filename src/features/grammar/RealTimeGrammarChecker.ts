@@ -15,13 +15,13 @@ export class RealTimeGrammarChecker {
 		private isRateLimited: () => boolean
 	) {}
 	
-	scheduleCheck(editor: Editor, callback: () => void): void {
+	scheduleCheck(editor: Editor, noteTitle: string | undefined, callback: () => void): void {
 		if (this.debounceTimer) {
 			clearTimeout(this.debounceTimer);
 		}
 
 		this.debounceTimer = setTimeout(async () => {
-			await this.checkGrammar(editor);
+			await this.checkGrammar(editor, noteTitle);
 			callback();
 		}, this.getSettings().debounceMs);
 	}
@@ -33,7 +33,7 @@ export class RealTimeGrammarChecker {
 		}
 	}
 	
-	private async checkGrammar(editor: Editor): Promise<void> {
+	private async checkGrammar(editor: Editor, noteTitle?: string): Promise<void> {
 		const text = editor.getValue();
 		if (!text.trim()) {
 			this.clearSuggestionMarkers();
@@ -53,7 +53,7 @@ export class RealTimeGrammarChecker {
 
 		try {
 			console.log('Starting real-time grammar check...');
-			const suggestions = await this.getGrammarSuggestions(text);
+			const suggestions = await this.getGrammarSuggestions(text, noteTitle);
 			console.log('Suggestions received:', suggestions);
 			this.displaySuggestions(editor, suggestions);
 		} catch (error) {
@@ -76,7 +76,7 @@ export class RealTimeGrammarChecker {
 		}
 	}
 	
-	private async getGrammarSuggestions(text: string): Promise<GrammarSuggestion[]> {
+	private async getGrammarSuggestions(text: string, noteTitle?: string): Promise<GrammarSuggestion[]> {
 		if (this.isRateLimited()) {
 			throw new Error('Rate limit in effect');
 		}
@@ -89,7 +89,7 @@ export class RealTimeGrammarChecker {
 		console.log('Getting grammar suggestions for text length:', text.length);
 		
 		try {
-			const suggestions = await provider.getGrammarSuggestions(text, this.getSettings().temperature);
+			const suggestions = await provider.getGrammarSuggestions(text, this.getSettings().temperature, noteTitle);
 			return suggestions;
 		} catch (error: any) {
 			if (error.message.includes('429') || error.message.includes('rate limit')) {

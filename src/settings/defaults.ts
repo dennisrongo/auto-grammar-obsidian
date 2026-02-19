@@ -15,7 +15,7 @@ export const DEFAULT_SETTINGS: AISettings = {
 	temperature: 0.1,
 	autocompleteEnabled: true,
 	autocompleteDebounceMs: 500,
-	autocompleteMaxTokens: 50
+	autocompleteMaxTokens: 30
 };
 
 export function migrateSettings(loadedData: any): AISettings {

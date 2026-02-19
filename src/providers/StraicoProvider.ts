@@ -33,7 +33,8 @@ export class StraicoProvider extends BaseProvider {
 			const modelKeys = Object.keys(completions);
 			if (modelKeys.length > 0) {
 				const firstModelCompletion = completions[modelKeys[0]];
-				return firstModelCompletion?.completion?.choices?.[0]?.message?.content || '';
+				const message = firstModelCompletion?.completion?.choices?.[0]?.message;
+				return message?.content || message?.reasoning || '';
 			}
 		}
 		return data.choices?.[0]?.message?.content || '';
@@ -62,8 +63,6 @@ export class StraicoProvider extends BaseProvider {
 			max_tokens: maxTokens
 		};
 		
-		console.log('Straico API Request:', JSON.stringify(requestBody, null, 2));
-		
 		const response = await fetch(this.getBaseUrl(), {
 			method: 'POST',
 			headers: {
@@ -80,7 +79,6 @@ export class StraicoProvider extends BaseProvider {
 		}
 
 		const data = await response.json();
-		console.log('Straico API Response:', data);
 		
 		return this.extractStraicoContent(data) || '';
 	}

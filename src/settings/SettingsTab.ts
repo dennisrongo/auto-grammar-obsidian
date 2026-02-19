@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, Notice } from 'obsidian';
+import { App, Plugin, PluginSettingTab, Setting, Notice } from 'obsidian';
 import type { AIProvider } from '../providers';
 import { ProviderFactory } from '../providers';
 import type { AISettings, ModelInfo } from '../types';
@@ -20,8 +20,8 @@ export interface SettingsTabDependencies {
 export class AISettingsTab extends PluginSettingTab {
 	private deps: SettingsTabDependencies;
 	
-	constructor(app: App, private containerElement: HTMLElement, deps: SettingsTabDependencies) {
-		super(app, containerElement as any);
+	constructor(app: App, plugin: Plugin, deps: SettingsTabDependencies) {
+		super(app, plugin);
 		this.deps = deps;
 	}
 	

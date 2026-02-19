@@ -1,7 +1,7 @@
 import { Editor, Notice } from 'obsidian';
 import type { AIProvider } from '../../providers';
 import type { AISettings, AutocompleteSuggestion } from '../../types';
-import { shouldTriggerAutocomplete, escapeHtml } from '../../utils';
+import { shouldTriggerAutocomplete, escapeHtml, isAtSentenceStart, adjustSuggestionCasing } from '../../utils';
 
 export class AutocompleteService {
 	private timer: NodeJS.Timeout | null = null;
@@ -19,7 +19,7 @@ export class AutocompleteService {
 		private updateStatusBar: (text: string) => void
 	) {}
 	
-	scheduleAutocomplete(editor: Editor): void {
+	scheduleAutocomplete(editor: Editor, noteTitle?: string): void {
 		if (this.isAccepting) {
 			console.log('Autocomplete skipped: currently accepting a suggestion');
 			return;
@@ -34,7 +34,7 @@ export class AutocompleteService {
 		this.updateStatusBar('⏳ Getting AI suggestion...');
 
 		this.timer = setTimeout(async () => {
-			await this.getSuggestion(editor);
+			await this.getSuggestion(editor, noteTitle);
 			this.updateStatusBar('');
 		}, this.getSettings().autocompleteDebounceMs);
 	}
@@ -50,7 +50,7 @@ export class AutocompleteService {
 		this.lastCursorPosition = position;
 	}
 	
-	async triggerManually(editor: Editor): Promise<void> {
+	async triggerManually(editor: Editor, noteTitle?: string): Promise<void> {
 		if (!this.getSettings().autocompleteEnabled) {
 			new Notice('Autocomplete is disabled. Enable it in settings.');
 			return;
@@ -58,11 +58,11 @@ export class AutocompleteService {
 		
 		new Notice('Getting suggestion...');
 		this.updateStatusBar('⏳ Getting AI suggestion...');
-		await this.getSuggestion(editor);
+		await this.getSuggestion(editor, noteTitle);
 		this.updateStatusBar('');
 	}
 	
-	private async getSuggestion(editor: Editor): Promise<void> {
+	private async getSuggestion(editor: Editor, noteTitle?: string): Promise<void> {
 		if (this.isRateLimited() || !this.getCurrentApiKey()) {
 			console.log('Autocomplete skipped: rate limited or no API key');
 			return;
@@ -87,12 +87,15 @@ export class AutocompleteService {
 
 			console.log('Calling AI for autocomplete...');
 			
-			const suggestion = await this.callAI(contextBefore);
+			const suggestion = await this.callAI(contextBefore, noteTitle);
 			
 			console.log('Received suggestion:', suggestion);
 			
 			if (suggestion && suggestion.trim()) {
-				this.display(editor, suggestion, cursorOffset);
+				const isStartOfSentence = isAtSentenceStart(contextBefore);
+				const adjustedSuggestion = adjustSuggestionCasing(suggestion, isStartOfSentence);
+				console.log('Casing adjusted:', { isStartOfSentence, adjustedSuggestion });
+				this.display(editor, adjustedSuggestion, cursorOffset);
 			} else {
 				console.log('No suggestion received');
 			}
@@ -101,7 +104,7 @@ export class AutocompleteService {
 		}
 	}
 	
-	private async callAI(contextBefore: string): Promise<string> {
+	private async callAI(contextBefore: string, noteTitle?: string): Promise<string> {
 		const provider = this.getProvider();
 		if (!provider) {
 			throw new Error('No AI provider configured');
@@ -111,7 +114,8 @@ export class AutocompleteService {
 			const suggestion = await provider.getAutocompleteSuggestion(
 				contextBefore, 
 				this.getSettings().temperature, 
-				this.getSettings().autocompleteMaxTokens
+				this.getSettings().autocompleteMaxTokens,
+				noteTitle
 			);
 			return suggestion;
 		} catch (error: any) {
