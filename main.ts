@@ -1,17 +1,6 @@
-import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, MarkdownRenderer } from 'obsidian';
-
-interface AISettings {
-	apiKey: string;
-	model: string;
-	baseUrl: string;
-	realTimeEnabled: boolean;
-	debounceMs: number;
-	rateLimitBackoff: number;
-	temperature: number;
-	autocompleteEnabled: boolean;
-	autocompleteDebounceMs: number;
-	autocompleteMaxTokens: number;
-}
+import { App, Editor, MarkdownView, Notice, Plugin, PluginSettingTab, Setting, TFile, MarkdownRenderer, Modal, SuggestModal } from 'obsidian';
+import { AIProvider, ProviderFactory } from './providers';
+import { AISettings } from './types';
 
 interface GrammarSuggestion {
 	start: number;
@@ -27,7 +16,12 @@ interface AutocompleteSuggestion {
 }
 
 const DEFAULT_SETTINGS: AISettings = {
-	apiKey: '',
+	provider: 'zai',
+	apiKeys: {
+		zai: '',
+		openai: '',
+		straico: ''
+	},
 	model: 'GLM-4-32B-0414-128K',
 	baseUrl: 'https://api.z.ai/api/paas/v4/chat/completions',
 	realTimeEnabled: true,
@@ -41,6 +35,9 @@ const DEFAULT_SETTINGS: AISettings = {
 
 export default class AIGrammarAssistant extends Plugin {
 	settings: AISettings;
+	provider: AIProvider | null = null;
+	public straicoproviderModels: { id: string; name: string }[] = [];
+	public openaiModels: { id: string; name: string }[] = [];
 	private debounceTimer: NodeJS.Timeout | null = null;
 	private activeEditor: Editor | null = null;
 	private currentSuggestions: GrammarSuggestion[] = [];
@@ -53,6 +50,7 @@ export default class AIGrammarAssistant extends Plugin {
 	private lastCursorPosition: number = 0;
 	private autocompleteHintElement: HTMLElement | null = null;
 	private statusBarItem: HTMLElement | null = null;
+	private isAcceptingAutocomplete: boolean = false;
 
 	async onload() {
 		await this.loadSettings();
@@ -83,7 +81,7 @@ export default class AIGrammarAssistant extends Plugin {
 				});
 
 				menu.addItem((item) => {
-					item.setTitle('Improve Writing')
+					item.setTitle('Improve Writing (Selected)')
 						.setIcon('pencil')
 						.onClick(async () => {
 							await this.improveWriting(editor);
@@ -143,7 +141,7 @@ export default class AIGrammarAssistant extends Plugin {
 			editorCallback: async (editor: Editor, view: MarkdownView) => {
 				new Notice('Testing autocomplete...');
 				console.log('=== AUTOCOMPLETE DEBUG ===');
-				console.log('API Key set:', !!this.settings.apiKey);
+				console.log('API Key set:', !!this.getCurrentApiKey());
 				console.log('Autocomplete enabled:', this.settings.autocompleteEnabled);
 				console.log('Rate limited:', this.isRateLimited);
 				console.log('Current autocomplete:', this.currentAutocomplete);
@@ -182,11 +180,49 @@ export default class AIGrammarAssistant extends Plugin {
 	}
 
 	async loadSettings() {
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+		// Load settings with migration support
+		const loadedData = await this.loadData();
+		
+		// Handle migration from old apiKey format to new apiKeys format
+		if (loadedData && loadedData.apiKey && !loadedData.apiKeys) {
+			// Migrate existing API key to Z.ai provider (as it was the original)
+			loadedData.apiKeys = {
+				zai: loadedData.apiKey,
+				openai: '',
+				straico: ''
+			};
+			// Remove old apiKey property
+			delete loadedData.apiKey;
+			// Save the migrated data
+			await this.saveData(loadedData);
+		}
+		
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, loadedData);
+		this.initializeProvider();
 	}
 
 	async saveSettings() {
 		await this.saveData(this.settings);
+		this.initializeProvider();
+	}
+	
+	private initializeProvider() {
+		this.provider = ProviderFactory.createProvider(this.settings.provider);
+		if (this.provider) {
+			this.provider.setConfiguration(
+				this.getCurrentApiKey(),
+				this.settings.model,
+				this.settings.baseUrl
+			);
+		}
+	}
+	
+	getCurrentApiKey(): string {
+		return this.settings.apiKeys[this.settings.provider as keyof typeof this.settings.apiKeys] || '';
+	}
+	
+	setCurrentApiKey(apiKey: string) {
+		this.settings.apiKeys[this.settings.provider as keyof typeof this.settings.apiKeys] = apiKey;
 	}
 
 	private setupRealTimeChecking() {
@@ -264,6 +300,12 @@ export default class AIGrammarAssistant extends Plugin {
 	private debouncedAutocomplete(editor: Editor) {
 		console.log('debouncedAutocomplete called');
 		
+		// Don't trigger autocomplete if we're in the process of accepting one
+		if (this.isAcceptingAutocomplete) {
+			console.log('Autocomplete skipped: currently accepting a suggestion');
+			return;
+		}
+		
 		if (this.autocompleteTimer) {
 			clearTimeout(this.autocompleteTimer);
 		}
@@ -299,7 +341,7 @@ export default class AIGrammarAssistant extends Plugin {
 	}
 
 	private async getAutocompleteSuggestion(editor: Editor) {
-		if (this.isRateLimited || !this.settings.apiKey) {
+		if (this.isRateLimited || !this.getCurrentApiKey()) {
 			console.log('Autocomplete skipped: rate limited or no API key');
 			return;
 		}
@@ -349,55 +391,23 @@ export default class AIGrammarAssistant extends Plugin {
 	}
 
 	private async callAIForAutocomplete(contextBefore: string): Promise<string> {
-		const response = await fetch(this.settings.baseUrl, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Authorization': `Bearer ${this.settings.apiKey}`
-			},
-			body: JSON.stringify({
-				model: this.settings.model,
-				messages: [
-					{
-						role: 'system',
-						content: 'You are an autocomplete assistant. Continue the text naturally. Return ONLY the continuation text, nothing else. Do not repeat any of the input text. Keep it concise (1-2 sentences maximum).'
-					},
-					{
-						role: 'user',
-						content: `Continue this text: "${contextBefore}"`
-					}
-				],
-				temperature: this.settings.temperature,
-				max_tokens: this.settings.autocompleteMaxTokens,
-				stop: ['\n\n', '---']
-			})
-		});
-
-		if (!response.ok) {
-			if (response.status === 429) {
+		if (!this.provider) {
+			throw new Error('No AI provider configured');
+		}
+		
+		try {
+			const suggestion = await this.provider.getAutocompleteSuggestion(
+				contextBefore, 
+				this.settings.temperature, 
+				this.settings.autocompleteMaxTokens
+			);
+			return suggestion;
+		} catch (error: any) {
+			if (error.message.includes('429')) {
 				this.handleRateLimit();
 			}
-			throw new Error(`API error: ${response.status}`);
+			throw error;
 		}
-
-		const data = await response.json();
-		let suggestion = data.choices?.[0]?.message?.content || '';
-		
-		// Clean up the suggestion
-		suggestion = suggestion.trim();
-		
-		// Remove any leading spaces if context ends with space
-		if (contextBefore.endsWith(' ') || contextBefore.endsWith('\n')) {
-			suggestion = suggestion.trimStart();
-		}
-		
-		// Limit to reasonable length
-		const words = suggestion.split(/\s+/);
-		if (words.length > 20) {
-			suggestion = words.slice(0, 20).join(' ') + '...';
-		}
-		
-		return suggestion;
 	}
 
 	private displayAutocomplete(editor: Editor, suggestion: string, cursorPos: number) {
@@ -480,6 +490,9 @@ export default class AIGrammarAssistant extends Plugin {
 			return;
 		}
 
+		// Set flag to prevent re-triggering autocomplete
+		this.isAcceptingAutocomplete = true;
+
 		const editor = this.activeEditor;
 		const cursor = editor.getCursor();
 		
@@ -503,6 +516,11 @@ export default class AIGrammarAssistant extends Plugin {
 		
 		new Notice('✓ Suggestion accepted');
 		this.clearAutocomplete();
+		
+		// Reset flag after a short delay to allow editor-change events to settle
+		setTimeout(() => {
+			this.isAcceptingAutocomplete = false;
+		}, 500);
 	}
 
 	private clearAutocomplete() {
@@ -533,7 +551,7 @@ export default class AIGrammarAssistant extends Plugin {
 			return;
 		}
 
-		if (!this.settings.apiKey) {
+		if (!this.getCurrentApiKey()) {
 			this.clearSuggestionMarkers();
 			console.log('API key not set, skipping grammar check');
 			return;
@@ -554,16 +572,18 @@ export default class AIGrammarAssistant extends Plugin {
 			this.clearSuggestionMarkers();
 			
 			// Show user-friendly error
-			if (error.message.includes('fetch')) {
-				new Notice('Network error: Check your internet connection and API URL');
-			} else if (error.message.includes('401') || error.message.includes('403')) {
-				new Notice('Authentication error: Check your API key');
-			} else if (error.message.includes('404')) {
-				new Notice('API endpoint not found: Check your base URL setting');
-			} else if (error.message.includes('429') || error.message.includes('rate limit')) {
-				this.handleRateLimit();
-			} else {
-				new Notice('Grammar check failed: ' + error.message);
+			if (error instanceof Error) {
+				if (error.message.includes('fetch')) {
+					new Notice('Network error: Check your internet connection and API URL');
+				} else if (error.message.includes('401') || error.message.includes('403')) {
+					new Notice('Authentication error: Check your API key');
+				} else if (error.message.includes('404')) {
+					new Notice('API endpoint not found: Check your base URL setting');
+				} else if (error.message.includes('429') || error.message.includes('rate limit')) {
+					this.handleRateLimit();
+				} else {
+					new Notice('Grammar check failed: ' + error.message);
+				}
 			}
 		}
 	}
@@ -586,66 +606,26 @@ export default class AIGrammarAssistant extends Plugin {
 	}
 
 	async testApiConnection(): Promise<boolean> {
-		if (!this.settings.apiKey) {
+		if (!this.getCurrentApiKey()) {
 			new Notice('Please set your API key first');
 			return false;
 		}
 
+		if (!this.provider) {
+			new Notice('No AI provider configured');
+			return false;
+		}
+
 		try {
-			console.log('Testing API connection to:', this.settings.baseUrl);
+			console.log('Testing API connection with provider:', this.settings.provider);
 			
-			const response = await fetch(this.settings.baseUrl, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${this.settings.apiKey}`
-				},
-				body: JSON.stringify({
-					model: this.settings.model,
-					messages: [
-						{
-							role: 'system',
-							content: 'You are a helpful AI assistant.'
-						},
-						{
-							role: 'user',
-							content: 'Hello, please respond with "OK" to confirm you are working.'
-						}
-					],
-					temperature: this.settings.temperature,
-					max_tokens: 50
-				})
-			});
-
-			console.log('API test response status:', response.status);
+			const success = await this.provider.testConnection(this.getCurrentApiKey(), this.settings.model);
 			
-			if (!response.ok) {
-				const errorText = await response.text();
-				console.error('API test error:', errorText);
-				
-				if (response.status === 401) {
-					new Notice('Authentication failed: Invalid API key');
-				} else if (response.status === 404) {
-					new Notice('API endpoint not found: Check your base URL');
-				} else if (response.status === 429) {
-					new Notice('Rate limit reached: Try again later or upgrade your plan');
-					this.handleRateLimit();
-				} else if (response.status >= 500) {
-					new Notice('Server error: Try again later');
-				} else {
-					new Notice(`API error (${response.status}): ${errorText}`);
-				}
-				return false;
-			}
-
-			const data = await response.json();
-			console.log('API test response:', data);
-			
-			if (data.choices && data.choices.length > 0) {
+			if (success) {
 				new Notice('API connection successful!');
 				return true;
 			} else {
-				new Notice('Unexpected API response format');
+				new Notice('API connection failed. Check your settings.');
 				return false;
 			}
 		} catch (error) {
@@ -653,6 +633,9 @@ export default class AIGrammarAssistant extends Plugin {
 			if (error instanceof Error) {
 				if (error.message.includes('fetch')) {
 					new Notice('Network error: Check your internet connection and API URL');
+				} else if (error.message.includes('429')) {
+					new Notice('Rate limit reached: Try again later or upgrade your plan');
+					this.handleRateLimit();
 				} else {
 					new Notice('Connection failed: ' + error.message);
 				}
@@ -666,69 +649,20 @@ export default class AIGrammarAssistant extends Plugin {
 			throw new Error('Rate limit in effect');
 		}
 
+		if (!this.provider) {
+			throw new Error('No AI provider configured');
+		}
+
 		console.log('Getting grammar suggestions for text length:', text.length);
 		
-		const response = await fetch(this.settings.baseUrl, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json',
-				'Authorization': `Bearer ${this.settings.apiKey}`
-			},
-			body: JSON.stringify({
-				model: this.settings.model,
-				messages: [
-					{
-						role: 'system',
-						content: 'You are a grammar checker. Analyze the text for grammar, spelling, and style issues. For each issue found, provide a JSON response with the start position, end position, suggestion text, type (grammar/spelling/style), and original text. Return only the JSON array without explanations. Format: [{"start": 0, "end": 5, "suggestion": "corrected", "type": "grammar", "original": "wrong"}]'
-					},
-					{
-						role: 'user',
-						content: `Please analyze this text for grammar and spelling issues: "${text}"`
-					}
-				],
-					temperature: this.settings.temperature,
-					max_tokens: 1500
-			})
-		});
-
-		if (response.status === 429) {
-			const errorText = await response.text();
-			console.error('Rate limit error:', errorText);
-			throw new Error('Rate limit reached for requests');
-		}
-
-		if (!response.ok) {
-			const errorText = await response.text();
-			throw new Error(`API error: ${response.status}, ${errorText}`);
-		}
-
-		const data = await response.json();
-		console.log('Grammar suggestions API response:', data);
-		
-		let content = data.choices?.[0]?.message?.content || '[]';
-		console.log('Raw suggestions content:', content);
-		
-		// Handle different response formats
-		if (typeof content === 'string') {
-			content = content.trim();
-			
-			// Try to extract JSON from various formats
-			if (!content.startsWith('[') && !content.startsWith('{')) {
-				// Look for JSON in the response
-				const jsonMatch = content.match(/\[[\s\S]*\]/);
-				if (jsonMatch) {
-					content = jsonMatch[0];
-				}
-			}
-		}
-		
 		try {
-			const suggestions = JSON.parse(content);
-			console.log('Parsed suggestions:', suggestions);
-			return Array.isArray(suggestions) ? suggestions : [];
-		} catch (error) {
-			console.error('Failed to parse suggestions JSON:', error, 'Content was:', content);
-			return [];
+			const suggestions = await this.provider.getGrammarSuggestions(text, this.settings.temperature);
+			return suggestions;
+		} catch (error: any) {
+			if (error.message.includes('429') || error.message.includes('rate limit')) {
+				throw new Error('Rate limit reached for requests');
+			}
+			throw error;
 		}
 	}
 
@@ -866,72 +800,32 @@ export default class AIGrammarAssistant extends Plugin {
 	}
 
 	private async callAI(text: string, instruction: string): Promise<string> {
-		if (!this.settings.apiKey) {
+		if (!this.getCurrentApiKey()) {
 			new Notice('Please set your API key in the plugin settings');
 			return '';
 		}
 
+		if (!this.provider) {
+			new Notice('No AI provider configured');
+			return text;
+		}
+
 		try {
-			console.log('Making API call to:', this.settings.baseUrl);
+			console.log('Making API call with provider:', this.settings.provider);
 			console.log('Using model:', this.settings.model);
 			console.log('Input text:', text);
 			console.log('Instruction:', instruction);
 			
-			const response = await fetch(this.settings.baseUrl, {
-				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json',
-					'Authorization': `Bearer ${this.settings.apiKey}`
-				},
-				body: JSON.stringify({
-					model: this.settings.model,
-					messages: [
-						{
-							role: 'system',
-							content: instruction
-						},
-						{
-							role: 'user',
-							content: text
-						}
-					],
-					temperature: this.settings.temperature,
-					max_tokens: 2000
-				})
-			});
-
-			if (!response.ok) {
-				const errorText = await response.text();
-				console.error('API Error Response:', errorText);
-				
-				if (response.status === 429) {
-					this.handleRateLimit();
-					throw new Error('Rate limit reached for requests');
-				}
-				
-				throw new Error(`HTTP error! status: ${response.status}, message: ${errorText}`);
-			}
-
-			const data = await response.json();
-			console.log('API Response:', data);
-			console.log('Choices:', data.choices);
-			console.log('First choice:', data.choices?.[0]);
-			console.log('Message content:', data.choices?.[0]?.message?.content);
-			
-			let result = data.choices?.[0]?.message?.content || text;
-			
-			// Handle different model response formats
-			if (typeof result === 'string') {
-				result = result.trim();
-			}
+			const result = await this.provider.callAPI(text, instruction, this.settings.temperature, 2000);
 			
 			console.log('Final processed result:', result);
 			return result;
-		} catch (error) {
+		} catch (error: any) {
 			console.error('AI API Error:', error);
 			
 			if (error instanceof Error) {
-				if (error.message.includes('rate limit')) {
+				if (error.message.includes('rate limit') || error.message.includes('429')) {
+					this.handleRateLimit();
 					new Notice('Rate limit reached. Pausing requests temporarily.');
 				} else {
 					new Notice('Failed to connect to AI service. Please check your settings.');
@@ -950,11 +844,76 @@ export default class AIGrammarAssistant extends Plugin {
 		}
 
 		new Notice('Correcting grammar...');
-		const corrected = await this.callAI(selectedText, 'Correct the grammar and spelling of the following text while preserving the original meaning and formatting. Return only the corrected text without explanations.');
+		
+		// Check if the selection starts/ends with whitespace to preserve it
+		const leadingWhitespace = selectedText.match(/^(\s*)/)?.[1] || '';
+		const trailingWhitespace = selectedText.match(/(\s*)$/)?.[1] || '';
+		
+		// Get context before the selection to determine capitalization
+		const selectionStart = editor.getCursor('from');
+		const selectionEnd = editor.getCursor('to');
+		const lineStart = { line: selectionStart.line, ch: 0 };
+		const textBeforeSelection = editor.getRange(lineStart, selectionStart);
+		
+		// Determine if selection is at the start of a sentence
+		const isStartOfLine = selectionStart.ch === 0;
+		const isAfterSentenceEnd = /[.!?]\s*$/.test(textBeforeSelection);
+		const isAfterNewline = /\n\s*$/.test(textBeforeSelection);
+		const isStartOfSentence = isStartOfLine || isAfterSentenceEnd || isAfterNewline;
+		
+		// Get context after selection
+		const lineEnd = { line: selectionEnd.line, ch: editor.getLine(selectionEnd.line).length };
+		const textAfterSelection = editor.getRange(selectionEnd, lineEnd);
+		const isEndOfSentence = /[.!?]$/.test(selectedText.trim()) || textAfterSelection.match(/^\s*[.!?]/);
+		
+		// Check original capitalization pattern
+		const trimmedText = selectedText.trim();
+		const startsWithLowercase = /^[a-z]/.test(trimmedText);
+		const startsWithUppercase = /^[A-Z]/.test(trimmedText);
+		
+		const contextInfo = `Context: This text is ${isStartOfSentence ? 'at the START of a sentence' : 'in the MIDDLE of a sentence'}. ` +
+			`The original text ${startsWithUppercase ? 'starts with an uppercase letter' : startsWithLowercase ? 'starts with a lowercase letter' : 'does not start with a letter'}.`;
+		
+		const corrected = await this.callAI(
+			trimmedText, 
+			'Correct only the grammar and spelling errors in the following text.\n\n' +
+			`${contextInfo}\n\n` +
+			'IMPORTANT RULES:\n' +
+			'1. Return ONLY the corrected text with no explanations or commentary\n' +
+			'2. Do NOT add any formatting, markdown, or code blocks\n' +
+			'3. Do NOT add or remove line breaks\n' +
+			'4. Do NOT change the meaning or structure\n' +
+			'5. CAPITALIZATION RULES:\n' +
+			'   - If the text is in the MIDDLE of a sentence, keep the first letter lowercase (unless it\'s a proper noun)\n' +
+			'   - If the text is at the START of a sentence, capitalize the first letter\n' +
+			'   - Preserve proper nouns and acronyms\n' +
+			'6. If there are no errors, return the text exactly as is'
+		);
 		
 		if (corrected) {
-			// Always replace the selection, even if the text is the same
-			editor.replaceSelection(corrected);
+			// Clean the result
+			let cleanedResult = corrected;
+			
+			// Remove any markdown code blocks if the AI added them
+			cleanedResult = cleanedResult.replace(/^```(?:\w*)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+			
+			// Remove any "Here's the corrected..." type prefixes
+			cleanedResult = cleanedResult.replace(/^(Here'?s? (is )?(the )?correct(ed)? (text|version|grammar)[:.]?\s*)/i, '');
+			cleanedResult = cleanedResult.replace(/^(Corrected (text|version|grammar)[:.]?\s*)/i, '');
+			
+			// Trim extra whitespace but preserve intentional formatting
+			cleanedResult = cleanedResult.trim();
+			
+			// Final check: if original started with lowercase and we're not at sentence start, ensure lowercase
+			if (!isStartOfSentence && startsWithLowercase && cleanedResult.length > 0) {
+				cleanedResult = cleanedResult.charAt(0).toLowerCase() + cleanedResult.slice(1);
+			}
+			
+			// Restore original leading/trailing whitespace
+			const finalResult = leadingWhitespace + cleanedResult + trailingWhitespace;
+			
+			// Replace the selection
+			editor.replaceSelection(finalResult);
 			new Notice('Grammar corrected');
 		}
 	}
@@ -967,11 +926,29 @@ export default class AIGrammarAssistant extends Plugin {
 		}
 
 		new Notice('Correcting document grammar...');
-		const corrected = await this.callAI(fullText, 'Correct the grammar and spelling of the following markdown document while preserving the original formatting, markdown syntax, and meaning. Return only the corrected document without explanations.');
+		const corrected = await this.callAI(
+			fullText, 
+			'Correct only the grammar and spelling errors in the following markdown document. ' +
+			'IMPORTANT RULES:\n' +
+			'1. Return ONLY the corrected document with no explanations or commentary\n' +
+			'2. Do NOT add any extra formatting or code blocks\n' +
+			'3. Preserve ALL markdown syntax exactly (headers, links, bold, italic, lists, code blocks, etc.)\n' +
+			'4. Do NOT change the document structure or add/remove sections\n' +
+			'5. Preserve the original line breaks and paragraph structure\n' +
+			'6. If there are no errors, return the text exactly as is'
+		);
 		
-		if (corrected && corrected !== fullText) {
-			editor.setValue(corrected);
-			new Notice('Document grammar corrected');
+		if (corrected) {
+			// Clean the result
+			let cleanedResult = corrected;
+			
+			// Remove any markdown code blocks if the AI wrapped the response
+			cleanedResult = cleanedResult.replace(/^```(?:markdown|md)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+			
+			if (cleanedResult !== fullText) {
+				editor.setValue(cleanedResult);
+				new Notice('Document grammar corrected');
+			}
 		}
 	}
 
@@ -983,11 +960,68 @@ export default class AIGrammarAssistant extends Plugin {
 		}
 
 		new Notice('Improving writing...');
-		const improved = await this.callAI(selectedText, 'Improve the clarity, style, and flow of the following text while preserving the original meaning and key information. Make it more professional and readable. Return only the improved text without explanations.');
+		
+		// Check if the selection starts/ends with whitespace to preserve it
+		const leadingWhitespace = selectedText.match(/^(\s*)/)?.[1] || '';
+		const trailingWhitespace = selectedText.match(/(\s*)$/)?.[1] || '';
+		
+		// Get context before the selection to determine capitalization
+		const selectionStart = editor.getCursor('from');
+		const selectionEnd = editor.getCursor('to');
+		const lineStart = { line: selectionStart.line, ch: 0 };
+		const textBeforeSelection = editor.getRange(lineStart, selectionStart);
+		
+		// Determine if selection is at the start of a sentence
+		const isStartOfLine = selectionStart.ch === 0;
+		const isAfterSentenceEnd = /[.!?]\s*$/.test(textBeforeSelection);
+		const isAfterNewline = /\n\s*$/.test(textBeforeSelection);
+		const isStartOfSentence = isStartOfLine || isAfterSentenceEnd || isAfterNewline;
+		
+		// Check original capitalization pattern
+		const trimmedText = selectedText.trim();
+		const startsWithLowercase = /^[a-z]/.test(trimmedText);
+		
+		const contextInfo = `Context: This text is ${isStartOfSentence ? 'at the START of a sentence' : 'in the MIDDLE of a sentence'}.`;
+		
+		const improved = await this.callAI(
+			trimmedText,
+			'Improve the clarity, style, and flow of the following text.\n\n' +
+			`${contextInfo}\n\n` +
+			'IMPORTANT RULES:\n' +
+			'1. Return ONLY the improved text with no explanations or commentary\n' +
+			'2. Do NOT add any formatting, markdown, or code blocks\n' +
+			'3. Do NOT add or remove line breaks\n' +
+			'4. Preserve the original meaning and key information\n' +
+			'5. Make it more professional and readable\n' +
+			'6. Do NOT change technical terms or proper nouns\n' +
+			'7. CAPITALIZATION RULES:\n' +
+			'   - If the text is in the MIDDLE of a sentence, keep the first letter lowercase (unless it\'s a proper noun)\n' +
+			'   - If the text is at the START of a sentence, capitalize the first letter'
+		);
 		
 		if (improved) {
-			// Always replace the selection, even if the text is the same
-			editor.replaceSelection(improved);
+			// Clean the result
+			let cleanedResult = improved;
+			
+			// Remove any markdown code blocks if the AI added them
+			cleanedResult = cleanedResult.replace(/^```(?:\w*)?\s*\n?/i, '').replace(/\n?```\s*$/i, '');
+			
+			// Remove any prefixes
+			cleanedResult = cleanedResult.replace(/^(Here'?s? (is )?(the )?improved (text|version|writing)[:.]?\s*)/i, '');
+			cleanedResult = cleanedResult.replace(/^(Improved (text|version|writing)[:.]?\s*)/i, '');
+			
+			// Trim extra whitespace
+			cleanedResult = cleanedResult.trim();
+			
+			// Final check: if original started with lowercase and we're not at sentence start, ensure lowercase
+			if (!isStartOfSentence && startsWithLowercase && cleanedResult.length > 0) {
+				cleanedResult = cleanedResult.charAt(0).toLowerCase() + cleanedResult.slice(1);
+			}
+			
+			// Restore original leading/trailing whitespace
+			const finalResult = leadingWhitespace + cleanedResult + trailingWhitespace;
+			
+			editor.replaceSelection(finalResult);
 			new Notice('Writing improved');
 		}
 	}
@@ -1000,6 +1034,231 @@ class AISettingTab extends PluginSettingTab {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
+	
+	async createStraicoModelDropdown(modelSetting: Setting, containerEl: HTMLElement) {
+		const currentApiKey = this.plugin.getCurrentApiKey();
+		
+		// Check if API key exists
+		if (!currentApiKey || currentApiKey.trim() === '') {
+			modelSetting.setDesc('Please enter an API key first to load available models');
+			modelSetting.addText(text => text
+				.setPlaceholder('Enter model ID manually')
+				.setValue(this.plugin.settings.model)
+				.onChange(async (value) => {
+					this.plugin.settings.model = value;
+					await this.plugin.saveSettings();
+				}));
+			return;
+		}
+		
+		// Fetch Straico models if not already loaded
+		if (this.plugin.straicoproviderModels.length === 0) {
+			try {
+				// Add loading state
+				modelSetting.setDesc('Loading available models...');
+				
+				if (this.plugin.provider && 'getAvailableModels' in this.plugin.provider) {
+					const provider = this.plugin.provider as any; // Type assertion for optional method
+					this.plugin.straicoproviderModels = await provider.getAvailableModels(currentApiKey);
+				}
+			} catch (error) {
+				console.error('Failed to load Straico models:', error);
+				modelSetting.setDesc('Failed to load models. Please check your API key and try again.');
+				// Fall back to text input
+				modelSetting.addText(text => text
+					.setPlaceholder('Enter model ID manually')
+					.setValue(this.plugin.settings.model)
+					.onChange(async (value) => {
+						this.plugin.settings.model = value;
+						await this.plugin.saveSettings();
+					}));
+				return;
+			}
+		}
+		
+		// Create dropdown with available models
+		modelSetting.setDesc('Select AI model to use');
+		modelSetting.addDropdown(dropdown => {
+			// Add available models to dropdown
+			this.plugin.straicoproviderModels.forEach(model => {
+				dropdown.addOption(model.id, model.name);
+			});
+			
+			// Add custom option for manual model entry
+			dropdown.addOption('custom', 'Custom (enter model ID manually)');
+			
+			// Set current value
+			const currentValue = this.plugin.settings.model;
+			dropdown.setValue(currentValue);
+			
+			dropdown.onChange(async (value) => {
+				if (value === 'custom') {
+					// Show text input for custom model
+					const customModel = await this.showCustomModelDialog();
+					if (customModel) {
+						this.plugin.settings.model = customModel;
+					}
+				} else {
+					this.plugin.settings.model = value;
+				}
+				await this.plugin.saveSettings();
+				this.display(); // Refresh the display
+			});
+		});
+	}
+	
+	async showCustomModelDialog(): Promise<string | null> {
+		return new Promise((resolve) => {
+			const modal = new CustomModelModal(this.app, (result) => {
+				resolve(result);
+			});
+			modal.open();
+		});
+	}
+	
+	async createOpenAIModelDropdown(modelSetting: Setting, containerEl: HTMLElement) {
+		const currentApiKey = this.plugin.getCurrentApiKey();
+		
+		// Check if API key exists
+		if (!currentApiKey || currentApiKey.trim() === '') {
+			modelSetting.setDesc('Please enter an API key first to load available models');
+			modelSetting.addText(text => text
+				.setPlaceholder('Enter model name manually')
+				.setValue(this.plugin.settings.model)
+				.onChange(async (value) => {
+					this.plugin.settings.model = value;
+					await this.plugin.saveSettings();
+				}));
+			return;
+		}
+		
+		// Fetch OpenAI models if not already loaded
+		if (this.plugin.openaiModels.length === 0) {
+			try {
+				// Add loading state
+				modelSetting.setDesc('Loading available models...');
+				
+				if (this.plugin.provider && 'getAvailableModels' in this.plugin.provider) {
+					const provider = this.plugin.provider as any; // Type assertion for optional method
+					this.plugin.openaiModels = await provider.getAvailableModels(currentApiKey);
+				}
+			} catch (error) {
+				console.error('Failed to load OpenAI models:', error);
+				modelSetting.setDesc('Failed to load models. Please check your API key and try again.');
+				// Fall back to text input
+				modelSetting.addText(text => text
+					.setPlaceholder('Enter model name manually')
+					.setValue(this.plugin.settings.model)
+					.onChange(async (value) => {
+						this.plugin.settings.model = value;
+						await this.plugin.saveSettings();
+					}));
+				return;
+			}
+		}
+		
+		// Create dropdown with available models
+		modelSetting.setDesc('Select AI model to use');
+		modelSetting.addDropdown(dropdown => {
+			// Add available models to dropdown
+			this.plugin.openaiModels.forEach(model => {
+				dropdown.addOption(model.id, model.name);
+			});
+			
+			// Add custom option for manual model entry
+			dropdown.addOption('custom', 'Custom (enter model ID manually)');
+			
+			// Set current value
+			const currentValue = this.plugin.settings.model;
+			dropdown.setValue(currentValue);
+			
+			dropdown.onChange(async (value) => {
+				if (value === 'custom') {
+					// Show text input for custom model
+					const customModel = await this.showCustomModelDialog();
+					if (customModel) {
+						this.plugin.settings.model = customModel;
+					}
+				} else {
+					this.plugin.settings.model = value;
+				}
+				await this.plugin.saveSettings();
+				this.display(); // Refresh the display
+			});
+		});
+	}
+	
+	async createGenericModelDropdown(modelSetting: Setting, containerEl: HTMLElement) {
+		const currentApiKey = this.plugin.getCurrentApiKey();
+		
+		// Check if API key exists
+		if (!currentApiKey || currentApiKey.trim() === '') {
+			modelSetting.setDesc('Please enter an API key first to load available models');
+			modelSetting.addText(text => text
+				.setPlaceholder('Enter model ID manually')
+				.setValue(this.plugin.settings.model)
+				.onChange(async (value) => {
+					this.plugin.settings.model = value;
+					await this.plugin.saveSettings();
+				}));
+			return;
+		}
+		
+		// Generic implementation for providers with getAvailableModels
+		let models: { id: string; name: string }[] = [];
+		
+		try {
+			// Add loading state
+			modelSetting.setDesc('Loading available models...');
+			
+			if (this.plugin.provider && 'getAvailableModels' in this.plugin.provider) {
+				const provider = this.plugin.provider as any; // Type assertion for optional method
+				models = await provider.getAvailableModels(currentApiKey);
+			}
+		} catch (error) {
+			console.error('Failed to load models:', error);
+			modelSetting.setDesc('Failed to load models. Please check your API key and try again.');
+			// Fall back to text input
+			modelSetting.addText(text => text
+				.setPlaceholder('Enter model ID manually')
+				.setValue(this.plugin.settings.model)
+				.onChange(async (value) => {
+					this.plugin.settings.model = value;
+					await this.plugin.saveSettings();
+				}));
+			return;
+		}
+		
+		// Create dropdown with available models
+		modelSetting.setDesc('Select AI model to use');
+		modelSetting.addDropdown(dropdown => {
+			// Add available models to dropdown
+			models.forEach(model => {
+				dropdown.addOption(model.id, model.name);
+			});
+			
+			// Add custom option for manual model entry
+			dropdown.addOption('custom', 'Custom (enter model ID manually)');
+			
+			// Set current value
+			const currentValue = this.plugin.settings.model;
+			dropdown.setValue(currentValue);
+			
+			dropdown.onChange(async (value) => {
+				if (value === 'custom') {
+					// Show text input for custom model
+					const customModel = await this.showCustomModelDialog();
+					if (customModel) {
+						this.plugin.settings.model = customModel;
+					}
+				} else {
+					this.plugin.settings.model = value;
+				}
+				await this.plugin.saveSettings();
+				this.display(); // Refresh the display
+			});
+		});
+	}
 
 	display(): void {
 		const {containerEl} = this;
@@ -1009,26 +1268,83 @@ class AISettingTab extends PluginSettingTab {
 		containerEl.createEl('h2', {text: 'AI Grammar Assistant Settings'});
 
 		new Setting(containerEl)
-			.setName('API Key')
-			.setDesc('Your AI service API key (for GLM 4.5 Flash)')
-			.addText(text => text
-				.setPlaceholder('Enter your API key')
-				.setValue(this.plugin.settings.apiKey)
-				.onChange(async (value) => {
-					this.plugin.settings.apiKey = value;
-					await this.plugin.saveSettings();
-				}));
+			.setName('AI Provider')
+			.setDesc('Select the AI service provider to use for grammar checking and suggestions')
+			.addDropdown(dropdown => {
+				const providers = ProviderFactory.getAvailableProviders();
+				providers.forEach(provider => {
+					dropdown.addOption(provider.name, provider.displayName);
+				});
+				
+				dropdown.setValue(this.plugin.settings.provider)
+					.onChange(async (value) => {
+						this.plugin.settings.provider = value;
+						
+						// Clear cached models when switching providers
+						this.plugin.straicoproviderModels = [];
+						this.plugin.openaiModels = [];
+						
+						// Update default settings based on provider selection
+						const newProvider = ProviderFactory.createProvider(value);
+						if (newProvider) {
+							this.plugin.settings.baseUrl = newProvider.getDefaultBaseUrl();
+							this.plugin.settings.model = newProvider.getDefaultModel();
+							this.plugin.settings.temperature = newProvider.getDefaultTemperature();
+						}
+						
+						await this.plugin.saveSettings();
+						this.display(); // Refresh the settings display to show the correct API key
+					});
+			});
 
 		new Setting(containerEl)
-			.setName('Model')
-			.setDesc('AI model to use')
+			.setName('API Key')
+			.setDesc(`Your ${this.plugin.provider?.displayName || 'AI'} service API key`)
 			.addText(text => text
-				.setPlaceholder('glm-4.5-flash')
+				.setPlaceholder('Enter your API key')
+				.setValue(this.plugin.getCurrentApiKey())
+				.onChange(async (value) => {
+					const oldProvider = this.plugin.settings.provider;
+					this.plugin.setCurrentApiKey(value);
+					await this.plugin.saveSettings();
+					
+					// Clear cached models when API key changes
+					if (oldProvider === 'straico') {
+						this.plugin.straicoproviderModels = [];
+					} else if (oldProvider === 'openai') {
+						this.plugin.openaiModels = [];
+					}
+					
+					// Refresh display to update model dropdown
+					this.display();
+				}));
+
+		const modelSetting = new Setting(containerEl)
+			.setName('Model')
+			.setDesc('AI model to use');
+		
+		// Check if current provider supports model selection
+		if (this.plugin.provider && 'getAvailableModels' in this.plugin.provider) {
+			if (this.plugin.settings.provider === 'straico') {
+				// Straico provider - show dropdown of available models
+				this.createStraicoModelDropdown(modelSetting, containerEl);
+			} else if (this.plugin.settings.provider === 'openai') {
+				// OpenAI provider - show dropdown of available models
+				this.createOpenAIModelDropdown(modelSetting, containerEl);
+			} else {
+				// Fallback for other providers with getAvailableModels
+				this.createGenericModelDropdown(modelSetting, containerEl);
+			}
+		} else {
+			// Other providers - show text input
+			modelSetting.addText(text => text
+				.setPlaceholder('Enter model name')
 				.setValue(this.plugin.settings.model)
 				.onChange(async (value) => {
 					this.plugin.settings.model = value;
 					await this.plugin.saveSettings();
 				}));
+		}
 
 		new Setting(containerEl)
 			.setName('Base URL')
@@ -1154,8 +1470,81 @@ class AISettingTab extends PluginSettingTab {
 		containerEl.createEl('p', {text: 'Ghost text will appear in gray at your cursor position'});
 
 		containerEl.createEl('h3', {text: 'How to get started:'});
-		containerEl.createEl('p', {text: '1. Get an API key from Zhipu AI (https://z.ai/manage-apikey/apikey-list)'});
-		containerEl.createEl('p', {text: '2. Enter your API key above'});
+		
+		if (this.plugin.settings.provider === 'zai') {
+			containerEl.createEl('p', {text: '1. Get an API key from Zhipu AI (https://z.ai/manage-apikey/apikey-list)'});
+		} else if (this.plugin.settings.provider === 'openai') {
+			containerEl.createEl('p', {text: '1. Get an API key from OpenAI (https://platform.openai.com/api-keys)'});
+		} else if (this.plugin.settings.provider === 'straico') {
+			containerEl.createEl('p', {text: '1. Get an API key from Straico (https://straico.com/)'});
+		}
+		
+		containerEl.createEl('p', {text: '2. Select your provider above and enter your API key'});
 		containerEl.createEl('p', {text: '3. Right-click on any note or selected text to use the AI assistant'});
+	}
+}
+
+class CustomModelModal extends Modal {
+	private onSubmit: (result: string) => void;
+	private inputEl: HTMLInputElement;
+	
+	constructor(app: App, onSubmit: (result: string) => void) {
+		super(app);
+		this.onSubmit = onSubmit;
+	}
+	
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl('h2', { text: 'Enter Custom Model ID' });
+		
+		const inputContainer = contentEl.createDiv();
+		inputContainer.createEl('p', { 
+			text: 'Enter the Straico model ID (e.g., "openai/gpt-4o"):' 
+		});
+		
+		this.inputEl = inputContainer.createEl('input', {
+			type: 'text',
+			placeholder: 'openai/gpt-4o',
+			value: ''
+		});
+		this.inputEl.style.width = '100%';
+		this.inputEl.style.marginTop = '10px';
+		
+		const buttonContainer = contentEl.createDiv();
+		buttonContainer.style.marginTop = '20px';
+		buttonContainer.style.textAlign = 'right';
+		
+		const submitButton = buttonContainer.createEl('button', {
+			text: 'Submit',
+			cls: 'mod-cta'
+		});
+		submitButton.style.marginRight = '10px';
+		
+		const cancelButton = buttonContainer.createEl('button', {
+			text: 'Cancel'
+		});
+		
+		submitButton.onclick = () => {
+			const value = this.inputEl.value.trim();
+			if (value) {
+				this.onSubmit(value);
+			}
+			this.close();
+		};
+		
+		cancelButton.onclick = () => {
+			this.onSubmit('');
+			this.close();
+		};
+		
+		// Focus on input
+		setTimeout(() => {
+			this.inputEl.focus();
+		}, 10);
+	}
+	
+	onClose() {
+		const { contentEl } = this;
+		contentEl.empty();
 	}
 }
